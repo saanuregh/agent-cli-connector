@@ -78,13 +78,13 @@ func TestRewritesCoalesce(t *testing.T) {
 	})
 	startFake(t, f, agent.Config{PermissionMode: agent.PermissionBypass})
 	agents.set(false, map[string]any{"action": "edit", "resource": "a/*", "effect": "deny"})
-	emitLocated(f, "agent.updated", "/work")
+	emitLocated(f, "agent.updated", workDir)
 	<-entered
 	reads := f.count("GET", "/api/agent")
 	// While the first rewrite writes, each reload changes the rules again.
 	for i := 0; i < 20; i++ {
 		agents.set(false, map[string]any{"action": "edit", "resource": "b/*", "effect": "deny"}, map[string]any{"action": "read", "resource": string(rune('a'+i)) + "/*", "effect": "deny"})
-		emitLocated(f, "agent.updated", "/work")
+		emitLocated(f, "agent.updated", workDir)
 	}
 	time.Sleep(200 * time.Millisecond)
 	close(release)

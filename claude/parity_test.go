@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -644,6 +645,11 @@ func TestCheck(t *testing.T) {
 }
 
 func TestTailShellOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// os.Getuid is -1 there, so the library polls get_task_output
+		// instead; TestTailShellOutputViaControl covers that path.
+		t.Skip("shell output files are read only on Unix")
+	}
 	tmp := t.TempDir()
 	const id = "11111111-2222-4333-8444-555555555555"
 	dir := filepath.Join(tmp, "claude-"+strconv.Itoa(os.Getuid()), "-proj", id, "tasks")
@@ -705,6 +711,11 @@ func TestTailShellOutput(t *testing.T) {
 }
 
 func TestTailShellOutputSkipsForeignTempDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// os.Getuid is -1 there, so the library polls get_task_output
+		// instead; TestTailShellOutputViaControl covers that path.
+		t.Skip("shell output files are read only on Unix")
+	}
 	tmp := t.TempDir()
 	const id = "11111111-2222-4333-8444-555555555555"
 	planted := filepath.Join(tmp, "planted")

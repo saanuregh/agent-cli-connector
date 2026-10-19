@@ -255,12 +255,12 @@ func TestMCPConnectDoesNotBlockOtherDirectories(t *testing.T) {
 	})
 	defer close(release)
 	p := f.provider()
-	a, err := p.Start(context.Background(), agent.Config{Cwd: "/work", MCPServers: map[string]agent.MCPServer{"fast": agent.StdioServer("x")}})
+	a, err := p.Start(context.Background(), agent.Config{Cwd: workDir, MCPServers: map[string]agent.MCPServer{"fast": agent.StdioServer("x")}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	go func() {
-		b, err := p.Start(context.Background(), agent.Config{Cwd: "/other", MCPServers: map[string]agent.MCPServer{"slow": agent.StdioServer("y")}})
+		b, err := p.Start(context.Background(), agent.Config{Cwd: otherDir, MCPServers: map[string]agent.MCPServer{"slow": agent.StdioServer("y")}})
 		if err == nil {
 			_ = b.Close()
 		}
@@ -277,7 +277,7 @@ func TestMCPConnectDoesNotBlockOtherDirectories(t *testing.T) {
 
 func TestInvalidServerURLIsRedacted(t *testing.T) {
 	for _, u := range []string{"user:hunter2@host", "http//user:hunter2@", "%zz:hunter2"} {
-		_, err := newFakeServer(t).providerWithURL(u).Start(context.Background(), agent.Config{Cwd: "/work"})
+		_, err := newFakeServer(t).providerWithURL(u).Start(context.Background(), agent.Config{Cwd: workDir})
 		if err == nil || strings.Contains(err.Error(), "hunter2") {
 			t.Fatalf("%q: %v", u, err)
 		}

@@ -11,9 +11,10 @@ import (
 // calls start: Options.HelperDir when set, otherwise
 // agent-cli-connector/opencode under the user cache directory. The folders
 // the library uses must be plain directories this user owns, and are kept
-// at mode 0700. Folders above them are not checked: helper servers run
-// with project config turned off (see helperEnv), so configs and plugins
-// planted in a parent folder are not loaded.
+// at mode 0700 on Unix (see providerkit.CheckOwnDir). Folders above them
+// are not checked: helper servers run with project config turned off (see
+// helperEnv), so configs and plugins planted in a parent folder are not
+// loaded.
 func (p *Provider) helperDir() (string, error) {
 	if dir := p.opts.HelperDir; dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err != nil {

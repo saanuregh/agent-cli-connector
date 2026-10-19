@@ -84,7 +84,7 @@ func TestCloseWaitsForBackgroundRuleWrites(t *testing.T) {
 		return 204, nil
 	})
 	agents.set(false, map[string]any{"action": "edit", "resource": "secrets/*", "effect": "deny"})
-	emitLocated(f, "agent.updated", "/work")
+	emitLocated(f, "agent.updated", workDir)
 	<-entered
 	go func() {
 		time.Sleep(100 * time.Millisecond)

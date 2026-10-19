@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -308,7 +309,7 @@ func TestSessionEnvironment(t *testing.T) {
 		h.WaitClosed()
 	})
 	p := opencode.New(opencode.Options{Spawner: spawner, SharedServer: true, HelperDir: t.TempDir()})
-	sess, err := p.Start(context.Background(), agent.Config{Cwd: "/work", Env: map[string]string{"EXTRA": "x"}, UnsetEnv: []string{"OPENCODE_REVIEW_DROP"}})
+	sess, err := p.Start(context.Background(), agent.Config{Cwd: workDir, Env: map[string]string{"EXTRA": "x"}, UnsetEnv: []string{"OPENCODE_REVIEW_DROP"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +327,7 @@ func TestSharedMCPRegistration(t *testing.T) {
 	f.on("PUT /api/experimental/mcp/*", func(*fakeRequest) (int, any) { return 204, nil })
 	f.on("DELETE /api/experimental/mcp/*", func(*fakeRequest) (int, any) { return 204, nil })
 	p := f.provider()
-	cfg := agent.Config{Cwd: "/work", MCPServers: map[string]agent.MCPServer{"docs": agent.StdioServer("docs-mcp")}}
+	cfg := agent.Config{Cwd: workDir, MCPServers: map[string]agent.MCPServer{"docs": agent.StdioServer("docs-mcp")}}
 	a, err := p.Start(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -402,12 +403,17 @@ func TestHelperDirectory(t *testing.T) {
 			t.Fatalf("helper ran in %q, project config off = %v", seenDir, helperEnvSet())
 		}
 	}
-	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o700 {
+	// Windows file modes cannot make a directory private; see
+	// providerkit.CheckOwnDir.
+	if info, err := os.Stat(dir); err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
 		t.Fatalf("helper directory mode = %v, %v", info.Mode(), err)
 	}
 	// A symlink is refused.
 	link := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(t.TempDir(), link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("creating a symlink needs a privilege on Windows: %v", err)
+		}
 		t.Fatal(err)
 	}
 	p = opencode.New(opencode.Options{Spawner: spawner, HelperDir: link})
@@ -618,7 +624,7 @@ func TestServerExitReleasesHostTools(t *testing.T) {
 	tool := agent.Tool{Name: "t", Handler: func(context.Context, agent.ToolCallRequest) (agent.ToolResult, error) {
 		return agent.TextResult("x"), nil
 	}}
-	sess, err := opencode.New(opencode.Options{Spawner: spawner}).Start(context.Background(), agent.Config{Cwd: "/work", Tools: []agent.Tool{tool}})
+	sess, err := opencode.New(opencode.Options{Spawner: spawner}).Start(context.Background(), agent.Config{Cwd: workDir, Tools: []agent.Tool{tool}})
 	if err != nil {
 		t.Fatal(err)
 	}

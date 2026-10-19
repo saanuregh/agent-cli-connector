@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -72,6 +73,21 @@ func (f *fakeServer) provider() *opencode.Provider {
 	return opencode.New(opencode.Options{ServerURL: f.srv.URL, Password: "secret", AllowHostToolsOnAttachedServer: true})
 }
 
+// workDir and otherDir are the fixtures' project folders as the library
+// resolves them: absolute, which on Windows adds the current drive.
+var (
+	workDir  = absPath("/work")
+	otherDir = absPath("/other")
+)
+
+func absPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		panic(err)
+	}
+	return abs
+}
+
 func data(v any) map[string]any { return map[string]any{"data": v} }
 
 func sessionInfo(id string) map[string]any {
@@ -80,7 +96,7 @@ func sessionInfo(id string) map[string]any {
 		"model":    map[string]any{"providerID": "opencode", "id": "test-model", "variant": "default"},
 		"tokens":   map[string]any{"input": 0, "output": 0, "reasoning": 0, "cache": map[string]any{"read": 0, "write": 0}},
 		"time":     map[string]any{"created": 1000, "updated": 2000},
-		"location": map[string]any{"directory": "/work"},
+		"location": map[string]any{"directory": workDir},
 	}
 }
 
@@ -317,7 +333,7 @@ func startFake(t *testing.T, f *fakeServer, cfg agent.Config) (*opencode.Session
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if cfg.Cwd == "" {
-		cfg.Cwd = "/work"
+		cfg.Cwd = workDir
 	}
 	sess, err := f.provider().StartSession(ctx, cfg)
 	if err != nil {

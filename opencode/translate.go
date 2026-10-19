@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"maps"
 	"net/url"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1031,8 +1033,8 @@ func contentText(content []toolContent) (string, []agent.Image) {
 				if _, b64, ok := strings.Cut(rest, ";base64,"); ok {
 					img.Data, _ = base64.StdEncoding.DecodeString(b64)
 				}
-			} else if path, ok := strings.CutPrefix(c.URI, "file://"); ok {
-				img.Path, _ = url.PathUnescape(path)
+			} else if path, ok := fileURIPath(c.URI, runtime.GOOS == "windows"); ok {
+				img.Path = filepath.FromSlash(path)
 			} else {
 				img.URL = c.URI
 			}
@@ -1779,4 +1781,42 @@ func jsString(v any) string {
 		return "null"
 	}
 	return fmt.Sprint(v)
+}
+
+// fileURI returns the RFC 8089 file URI of an absolute path written with
+// forward slashes. On Windows a drive path gets a slash before its drive
+// (file:///C:/x) and a UNC path names its server as the host
+// (file://server/share/x).
+func fileURI(slashPath string, windows bool) string {
+	u := url.URL{Scheme: "file", Path: slashPath}
+	if windows {
+		if unc, ok := strings.CutPrefix(slashPath, "//"); ok {
+			host, rest, _ := strings.Cut(unc, "/")
+			u.Host, u.Path = host, "/"+rest
+		} else if !strings.HasPrefix(slashPath, "/") {
+			u.Path = "/" + slashPath
+		}
+	}
+	return u.String()
+}
+
+// fileURIPath returns the path, with forward slashes, of a file URI, the
+// inverse of fileURI. It reports false for another scheme, and for a URI
+// naming another host where paths cannot (outside Windows) name one.
+func fileURIPath(uri string, windows bool) (string, bool) {
+	u, err := url.Parse(uri)
+	if err != nil || u.Scheme != "file" {
+		return "", false
+	}
+	path := u.Path
+	switch {
+	case u.Host != "" && u.Host != "localhost":
+		if !windows {
+			return "", false
+		}
+		return "//" + u.Host + path, true
+	case windows && len(path) >= 3 && path[0] == '/' && path[2] == ':':
+		return path[1:], true
+	}
+	return path, true
 }

@@ -223,7 +223,7 @@ func TestEnabledToolsNameCollision(t *testing.T) {
 		"gh":            {Command: "gh-mcp", EnabledTools: []string{"search"}},
 		"gh_enterprise": {Command: "ghe-mcp"},
 	}
-	_, err := f.provider().StartSession(context.Background(), agent.Config{Cwd: "/work", MCPServers: servers})
+	_, err := f.provider().StartSession(context.Background(), agent.Config{Cwd: workDir, MCPServers: servers})
 	if err == nil || !strings.Contains(err.Error(), "gh_enterprise") {
 		t.Fatalf("StartSession = %v", err)
 	}
@@ -231,7 +231,7 @@ func TestEnabledToolsNameCollision(t *testing.T) {
 	f.on("GET /api/mcp", func(*fakeRequest) (int, any) {
 		return 200, data([]any{map[string]any{"name": "gh_enterprise", "status": map[string]any{"status": "connected"}}})
 	})
-	_, err = f.provider().StartSession(context.Background(), agent.Config{Cwd: "/work", MCPServers: map[string]agent.MCPServer{"gh": servers["gh"]}})
+	_, err = f.provider().StartSession(context.Background(), agent.Config{Cwd: workDir, MCPServers: map[string]agent.MCPServer{"gh": servers["gh"]}})
 	if err == nil || !strings.Contains(err.Error(), "gh_enterprise") {
 		t.Fatalf("StartSession with a configured server = %v", err)
 	}

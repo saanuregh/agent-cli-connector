@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1015,7 +1016,7 @@ func (s *Session) prepare(in agent.Input) (*prompt, error) {
 				if !filepath.IsAbs(path) {
 					path = filepath.Join(s.cwd, path)
 				}
-				file["uri"] = (&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String()
+				file["uri"] = fileURI(filepath.ToSlash(path), runtime.GOOS == "windows")
 			default:
 				return nil, errors.New("opencode: file part has neither data nor path")
 			}

@@ -566,7 +566,9 @@ func TestSessionStoreDiscoveryAndSubagents(t *testing.T) {
 		"home option": pi.New(pi.Options{SessionDir: "~/sessions"}),
 	} {
 		if name == "home option" {
+			// os.UserHomeDir reads USERPROFILE on Windows.
 			t.Setenv("HOME", dir)
+			t.Setenv("USERPROFILE", dir)
 		}
 		sums, err := p.ListSessions(ctx, agent.ListSessionsOptions{Cwd: cwd})
 		if err != nil {

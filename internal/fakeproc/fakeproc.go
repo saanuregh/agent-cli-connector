@@ -38,7 +38,7 @@ func Spawner(t testing.TB, script func(h *Harness)) (agent.Spawner, <-chan *Harn
 		stdoutR, stdoutW := io.Pipe()
 		stderrR, stderrW := io.Pipe()
 		h := &Harness{t: t, Cmd: cmd, in: bufio.NewReader(stdinR), out: stdoutW, errOut: stderrW, lines: make(chan []byte, 256)}
-		p := &process{stdin: stdinW, stdout: stdoutR, stderr: stderrR, done: make(chan struct{}), stdinR: stdinR}
+		p := &process{stdin: stdinW, stdout: stdoutR, stderr: stderrR, done: make(chan struct{}), killed: make(chan struct{}), stdinR: stdinR}
 		go func() {
 			for {
 				line, err := h.in.ReadBytes('\n')
@@ -154,21 +154,32 @@ type process struct {
 	stdout *io.PipeReader
 	stderr *io.PipeReader
 	done   chan struct{}
+	// killed is closed by Kill. A killed process counts as exited even
+	// while its script is blocked, as a real process does, so a failed
+	// test's Close returns instead of waiting on the script forever.
+	killed   chan struct{}
+	killOnce sync.Once
 }
 
 func (p *process) Stdin() io.WriteCloser { return p.stdin }
 func (p *process) Stdout() io.ReadCloser { return p.stdout }
 func (p *process) Stderr() io.ReadCloser { return p.stderr }
 func (p *process) Wait() error {
-	<-p.done
+	select {
+	case <-p.done:
+	case <-p.killed:
+	}
 	return nil
 }
-func (p *process) Terminate() error { return p.Kill() }
-func (p *process) Kill() error {
+func (p *process) Terminate() error {
 	_ = p.stdinR.Close()
 	_ = p.stdout.Close()
 	_ = p.stderr.Close()
 	return nil
+}
+func (p *process) Kill() error {
+	p.killOnce.Do(func() { close(p.killed) })
+	return p.Terminate()
 }
 
 // Get walks a decoded JSON value by keys and indexes.

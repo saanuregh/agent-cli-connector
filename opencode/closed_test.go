@@ -44,7 +44,7 @@ func second[T any](_ T, err error) error { return err }
 
 func TestSessionLifecycleContract(t *testing.T) {
 	f := newFakeServer(t)
-	sess, err := f.provider().StartSession(context.Background(), agent.Config{Cwd: "/work"})
+	sess, err := f.provider().StartSession(context.Background(), agent.Config{Cwd: workDir})
 	if err != nil {
 		t.Fatal(err)
 	}

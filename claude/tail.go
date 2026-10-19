@@ -71,6 +71,8 @@ func (t *translator) stopTail(toolUseID string) {
 // user could create that directory first in a shared temp root and plant
 // files or symlinks in it, so it is used only when it is a plain directory
 // this user owns; otherwise output is polled over the control channel.
+// Windows has no user IDs (os.Getuid returns -1), so output is always
+// polled there.
 func (s *Session) shellOutputRoot() string {
 	uid := os.Getuid()
 	if uid < 0 {

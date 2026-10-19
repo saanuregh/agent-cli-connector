@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -123,7 +124,7 @@ func TestCacheDir(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Mode().Perm() != 0o700 {
+		if unixModes && info.Mode().Perm() != 0o700 {
 			t.Errorf("%s: mode %v; want 0700", d, info.Mode().Perm())
 		}
 	}
@@ -131,6 +132,9 @@ func TestCacheDir(t *testing.T) {
 		t.Errorf("CacheDir(\"\") = %q, %v", got, err)
 	}
 	if err := os.Symlink(home, filepath.Join(root, "link")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("creating a symlink needs a privilege on Windows: %v", err)
+		}
 		t.Fatal(err)
 	}
 	if _, err := CacheDir("link"); err == nil || !strings.Contains(err.Error(), "not a plain directory") {

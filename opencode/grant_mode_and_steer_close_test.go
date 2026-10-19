@@ -268,7 +268,7 @@ func TestProviderCallLeasesSharedServer(t *testing.T) {
 	})
 	gate := make(chan struct{})
 	p := opencode.New(opencode.Options{Spawner: spawner, SharedServer: true, HelperDir: t.TempDir()})
-	sess, err := p.Start(context.Background(), agent.Config{Cwd: "/work"})
+	sess, err := p.Start(context.Background(), agent.Config{Cwd: workDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestHostToolsOnAttachedServerNeedOptIn(t *testing.T) {
 	f := newFakeServer(t)
 	tool := agent.Tool{Name: "t", Handler: func(context.Context, agent.ToolCallRequest) (agent.ToolResult, error) { return agent.ToolResult{}, nil }}
 	p := opencode.New(opencode.Options{ServerURL: f.srv.URL, Password: "secret"})
-	if _, err := p.Start(context.Background(), agent.Config{Cwd: "/work", Tools: []agent.Tool{tool}}); !errors.Is(err, agent.ErrUnsupported) {
+	if _, err := p.Start(context.Background(), agent.Config{Cwd: workDir, Tools: []agent.Tool{tool}}); !errors.Is(err, agent.ErrUnsupported) {
 		t.Fatalf("err = %v", err)
 	}
 }

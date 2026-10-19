@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -15,6 +16,16 @@ import (
 )
 
 const thread = "th-1"
+
+// absPath returns path as the library resolves a configured directory:
+// absolute, which on Windows adds the current drive.
+func absPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		panic(err)
+	}
+	return abs
+}
 
 // startThread answers initialize and thread/start, sending a warning for
 // the thread before thread/start returns.
@@ -57,7 +68,7 @@ func TestTurnApprovalsToolsQueueAndSteer(t *testing.T) {
 		}
 		p := start["params"].(map[string]any)
 		if p["approvalPolicy"] != "on-request" || p["sandbox"] != "workspace-write" || fakeproc.Str(p, "dynamicTools", 0, "name") != "add" ||
-			fakeproc.Str(p, "config", "model_reasoning_effort") != "low" || !strings.HasPrefix(fakeproc.Str(p, "cwd"), "/") {
+			fakeproc.Str(p, "config", "model_reasoning_effort") != "low" || fakeproc.Str(p, "cwd") != absPath("/w") {
 			t.Errorf("thread/start params = %v", p)
 		}
 		ts := h.RecvWhere(fakeproc.Method("turn/start"))

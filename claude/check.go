@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"os"
+	"runtime"
 
 	agent "github.com/saanuregh/agent-cli-connector"
 	"github.com/saanuregh/agent-cli-connector/internal/providerutil"
@@ -11,7 +12,20 @@ import (
 
 // managedMCPConfig is the policy file next to which the CLI refuses
 // --strict-mcp-config.
-const managedMCPConfig = "/etc/claude-code/managed-mcp.json"
+var managedMCPConfig = managedMCPConfigPath(runtime.GOOS)
+
+// managedMCPConfigPath returns where the CLI looks for managed-mcp.json
+// on goos, as https://code.claude.com/docs/en/managed-mcp lists.
+func managedMCPConfigPath(goos string) string {
+	switch goos {
+	case "darwin":
+		return "/Library/Application Support/ClaudeCode/managed-mcp.json"
+	case "windows":
+		return `C:\Program Files\ClaudeCode\managed-mcp.json`
+	default:
+		return "/etc/claude-code/managed-mcp.json"
+	}
+}
 
 // Check reports the CLI version from "claude --version" and the sign-in
 // state from the account in a short-lived initialize handshake that loads

@@ -20,8 +20,8 @@
 //
 // Provider calls that need a server, such as ListModels or ReadHistory,
 // start a short-lived private server unless Options.ServerURL is set or a
-// shared server runs. It runs in Options.HelperDir, or in a 0700 folder
-// under the user cache directory, with project config turned off
+// shared server runs. It runs in Options.HelperDir, or in a private
+// folder under the user cache directory, with project config turned off
 // (OPENCODE_DISABLE_PROJECT_CONFIG), because OpenCode otherwise loads
 // configs and plugins from its working directory and every parent. The
 // global config in the user's config directory still loads. Session
@@ -214,7 +214,7 @@ type Options struct {
 	// start, such as for ListModels or ReadHistory. Those servers load no
 	// project config. Empty means agent-cli-connector/opencode under the
 	// user cache directory. The folder must be a plain directory you own;
-	// it is kept at mode 0700.
+	// on Unix it is kept at mode 0700.
 	HelperDir string
 
 	// AllowHostToolsOnAttachedServer allows Config.Tools on a server named

@@ -267,7 +267,7 @@ func TestTurnOptionsAsyncQuestionsAndContextRestore(t *testing.T) {
 		ts := startTurn(h, "t1")
 		p := ts["params"].(map[string]any)
 		if p["approvalPolicy"] != "never" || fakeproc.Str(p, "sandboxPolicy", "type") != "readOnly" || p["approvalsReviewer"] != "user" ||
-			p["cwd"] != "/x" || p["serviceTier"] != "fast" || p["serviceTierForTurn"] != nil || fakeproc.Str(p, "additionalContext", "repo", "value") != "v" {
+			p["cwd"] != absPath("/x") || p["serviceTier"] != "fast" || p["serviceTierForTurn"] != nil || fakeproc.Str(p, "additionalContext", "repo", "value") != "v" {
 			t.Errorf("turn/start params = %v", p)
 		}
 		item(h, "item/completed", "t1", map[string]any{"type": "agentMessage", "id": "a1", "text": "Which?", "delivery": "async",

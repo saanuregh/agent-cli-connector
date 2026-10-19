@@ -167,12 +167,12 @@ func TestAgentUpdatedRewritesRules(t *testing.T) {
 	if rules := l.get(fakeSession); slices.Contains(rules, "edit:secrets/*=deny") {
 		t.Fatalf("another directory's reload changed the rules: %v", rules)
 	}
-	emitLocated(f, "agent.updated", "/work")
+	emitLocated(f, "agent.updated", workDir)
 	l.waitRules(t, fakeSession, func(r []string) bool { return slices.Contains(r, "edit:secrets/*=deny") })
 	l.waitRules(t, "ses_child", func(r []string) bool { return slices.Contains(r, "edit:secrets/*=deny") })
 	// A session pinned to an agent gets the reloaded rules too.
 	agents.set(false, deny, map[string]any{"action": "read", "resource": "keys/*", "effect": "deny"})
-	emitLocated(f, "agent.updated", "/work")
+	emitLocated(f, "agent.updated", workDir)
 	l.waitRules(t, fakeSession, func(r []string) bool { return slices.Contains(r, "read:keys/*=deny") })
 }
 
@@ -216,7 +216,7 @@ func TestMCPNameCollisionDirections(t *testing.T) {
 				list = append(list, map[string]any{"name": n, "status": map[string]any{"status": "connected"}})
 			}
 			f.on("GET /api/mcp", func(*fakeRequest) (int, any) { return 200, data(list) })
-			sess, err := f.provider().StartSession(context.Background(), agent.Config{Cwd: "/work", MCPServers: c.servers})
+			sess, err := f.provider().StartSession(context.Background(), agent.Config{Cwd: workDir, MCPServers: c.servers})
 			if err == nil {
 				defer sess.Close()
 			}

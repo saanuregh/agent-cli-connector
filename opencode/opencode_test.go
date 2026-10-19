@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -471,7 +473,7 @@ func TestPromptRejected(t *testing.T) {
 
 func TestResumeNotFound(t *testing.T) {
 	f := newFakeServer(t)
-	_, err := f.provider().Start(context.Background(), agent.Config{Cwd: "/work", Resume: "ses_missing"})
+	_, err := f.provider().Start(context.Background(), agent.Config{Cwd: workDir, Resume: "ses_missing"})
 	if !errors.Is(err, agent.ErrSessionNotFound) {
 		t.Fatalf("err = %v", err)
 	}
@@ -479,9 +481,9 @@ func TestResumeNotFound(t *testing.T) {
 
 func TestResumeAppliesSettings(t *testing.T) {
 	f := newFakeServer(t)
-	sess, _ := startFake(t, f, agent.Config{Resume: fakeSession, Model: "opencode/test-model#high", PermissionMode: agent.PermissionPlan, Title: "Renamed", AppendSystemPrompt: "be brief", Cwd: "/other"})
+	sess, _ := startFake(t, f, agent.Config{Resume: fakeSession, Model: "opencode/test-model#high", PermissionMode: agent.PermissionPlan, Title: "Renamed", AppendSystemPrompt: "be brief", Cwd: otherDir})
 	f.next("GET", "/api/session/"+fakeSession)
-	if r := f.next("POST", "/api/session/"+fakeSession+"/move"); r.Body["directory"] != "/other" {
+	if r := f.next("POST", "/api/session/"+fakeSession+"/move"); r.Body["directory"] != otherDir {
 		t.Fatalf("move = %v", r.Body)
 	}
 	if r := f.next("POST", "/api/session/"+fakeSession+"/model"); fakeproc.Str(r.Body, "model", "variant") != "high" {
@@ -495,17 +497,17 @@ func TestResumeAppliesSettings(t *testing.T) {
 		t.Fatalf("instructions = %v", r.Body)
 	}
 	info := sess.Info()
-	if info.Effort != "high" || info.PermissionMode != agent.PermissionPlan || info.Title != "Renamed" || info.Cwd != "/other" {
+	if info.Effort != "high" || info.PermissionMode != agent.PermissionPlan || info.Title != "Renamed" || info.Cwd != otherDir {
 		t.Fatalf("info = %+v", info)
 	}
 }
 
 func TestModelsAndModes(t *testing.T) {
 	f := newFakeServer(t)
-	if _, err := f.provider().Start(context.Background(), agent.Config{Cwd: "/work", Model: "opencode/nope"}); err == nil {
+	if _, err := f.provider().Start(context.Background(), agent.Config{Cwd: workDir, Model: "opencode/nope"}); err == nil {
 		t.Fatal("unknown model accepted")
 	}
-	if _, err := f.provider().Start(context.Background(), agent.Config{Cwd: "/work", PermissionMode: agent.PermissionDontAsk}); !errors.Is(err, agent.ErrUnsupported) {
+	if _, err := f.provider().Start(context.Background(), agent.Config{Cwd: workDir, PermissionMode: agent.PermissionDontAsk}); !errors.Is(err, agent.ErrUnsupported) {
 		t.Fatalf("dontAsk: %v", err)
 	}
 	sess, _ := startFake(t, f, agent.Config{})
@@ -549,7 +551,7 @@ func TestModelsAndModes(t *testing.T) {
 func TestConfigOutputSchemaIgnored(t *testing.T) {
 	schema := json.RawMessage(`{"type":"object"}`)
 	f := newFakeServer(t)
-	_, err := f.provider().Start(context.Background(), agent.Config{Cwd: "/work", OutputSchema: schema, Strict: true})
+	_, err := f.provider().Start(context.Background(), agent.Config{Cwd: workDir, OutputSchema: schema, Strict: true})
 	if !errors.Is(err, agent.ErrUnsupported) {
 		t.Fatalf("strict Config.OutputSchema: %v", err)
 	}
@@ -574,7 +576,12 @@ func TestInputParts(t *testing.T) {
 		agent.TextPart("look"), agent.ImageData("image/png", []byte("png")), agent.FileRef("notes.txt"), agent.SkillPart("docs", ""),
 	}, ProviderOptions: &opencode.TurnOptions{Agents: []string{"explore"}}})
 	r := f.next("POST", "/api/session/"+fakeSession+"/prompt")
-	if fakeproc.Str(r.Body, "files", 0, "uri") != "data:image/png;base64,cG5n" || fakeproc.Str(r.Body, "files", 1, "uri") != "file:///work/notes.txt" ||
+	// RFC 8089: a Windows drive path gets a slash, file:///D:/work/notes.txt.
+	notesURI := "file://" + filepath.ToSlash(filepath.Join(workDir, "notes.txt"))
+	if runtime.GOOS == "windows" {
+		notesURI = "file:///" + filepath.ToSlash(filepath.Join(workDir, "notes.txt"))
+	}
+	if fakeproc.Str(r.Body, "files", 0, "uri") != "data:image/png;base64,cG5n" || fakeproc.Str(r.Body, "files", 1, "uri") != notesURI ||
 		fakeproc.Str(r.Body, "skills", 0, "id") != "docs" || fakeproc.Str(r.Body, "agents", 0, "name") != "explore" {
 		t.Fatalf("prompt = %s", r.Raw)
 	}
@@ -704,14 +711,14 @@ func TestHistoryPagingAndSessions(t *testing.T) {
 		t.Fatalf("page = %+v", page)
 	}
 	f.on("GET /api/session", func(r *fakeRequest) (int, any) {
-		if r.Query.Get("directory") != "/work" || r.Query.Get("order") != "desc" {
+		if r.Query.Get("directory") != workDir || r.Query.Get("order") != "desc" {
 			t.Errorf("list query = %v", r.Query)
 		}
 		child := sessionInfo("ses_child")
 		child["parentID"] = fakeSession
 		return 200, map[string]any{"data": []any{sessionInfo("ses_new"), child, sessionInfo("ses_mid"), sessionInfo("ses_old")}, "cursor": map[string]any{}}
 	})
-	list, err := p.ListSessions(ctx, agent.ListSessionsOptions{Cwd: "/work", Offset: 1, Limit: 1})
+	list, err := p.ListSessions(ctx, agent.ListSessionsOptions{Cwd: workDir, Offset: 1, Limit: 1})
 	if err != nil || len(list) != 1 || list[0].ID != "ses_mid" || list[0].Model != "opencode/test-model" || !list[0].CreatedAt.Equal(time.UnixMilli(1000)) {
 		t.Fatalf("sessions = %+v, %v", list, err)
 	}
@@ -956,12 +963,12 @@ func TestPrivateServer(t *testing.T) {
 		close(closed)
 	})
 	p := opencode.New(opencode.Options{Path: "oc", Spawner: spawner})
-	sess, err := p.StartSession(context.Background(), agent.Config{Cwd: "/work", SystemPrompt: "You are terse.", Env: map[string]string{"A": "1"}, UnsetEnv: []string{"B"}})
+	sess, err := p.StartSession(context.Background(), agent.Config{Cwd: workDir, SystemPrompt: "You are terse.", Env: map[string]string{"A": "1"}, UnsetEnv: []string{"B"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	h := <-started
-	if got := strings.Join(h.Cmd.Args, " "); got != "serve --stdio --hostname 127.0.0.1 --port 0" || h.Cmd.Path != "oc" || h.Cmd.Dir != "/work" {
+	if got := strings.Join(h.Cmd.Args, " "); got != "serve --stdio --hostname 127.0.0.1 --port 0" || h.Cmd.Path != "oc" || h.Cmd.Dir != workDir {
 		t.Fatalf("command = %s %s in %s", h.Cmd.Path, got, h.Cmd.Dir)
 	}
 	// A session server loads its project's config.
@@ -992,7 +999,7 @@ func TestPrivateServer(t *testing.T) {
 		t.Fatal("server input not closed")
 	}
 	// A shared or attached server refuses SystemPrompt.
-	if _, err := f.provider().Start(context.Background(), agent.Config{Cwd: "/work", SystemPrompt: "x"}); !errors.Is(err, agent.ErrUnsupported) {
+	if _, err := f.provider().Start(context.Background(), agent.Config{Cwd: workDir, SystemPrompt: "x"}); !errors.Is(err, agent.ErrUnsupported) {
 		t.Fatalf("attached SystemPrompt: %v", err)
 	}
 }
@@ -1005,7 +1012,7 @@ func TestPrivateServerExit(t *testing.T) {
 		<-stop
 		h.Stderr("boom")
 	})
-	sess, err := opencode.New(opencode.Options{Spawner: spawner}).StartSession(context.Background(), agent.Config{Cwd: "/work"})
+	sess, err := opencode.New(opencode.Options{Spawner: spawner}).StartSession(context.Background(), agent.Config{Cwd: workDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1042,14 +1049,14 @@ func TestSharedServer(t *testing.T) {
 		h.WaitClosed()
 	})
 	p := opencode.New(opencode.Options{Spawner: spawner, SharedServer: true, HelperDir: t.TempDir()})
-	a, err := p.Start(context.Background(), agent.Config{Cwd: "/work", Env: map[string]string{"K": "V"}})
+	a, err := p.Start(context.Background(), agent.Config{Cwd: workDir, Env: map[string]string{"K": "V"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if r := f.next("PUT", "/api/session/"+fakeSession+"/environment"); fakeproc.Str(r.Body, "variables", "K") != "V" {
 		t.Fatalf("environment = %v", r.Body)
 	}
-	b, err := p.Start(context.Background(), agent.Config{Cwd: "/work"})
+	b, err := p.Start(context.Background(), agent.Config{Cwd: workDir})
 	if err != nil {
 		t.Fatal(err)
 	}

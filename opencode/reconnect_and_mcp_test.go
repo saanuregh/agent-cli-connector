@@ -172,7 +172,7 @@ func TestMCPReleaseRace(t *testing.T) {
 		return 204, nil
 	})
 	p := f.provider()
-	cfg := agent.Config{Cwd: "/work", MCPServers: map[string]agent.MCPServer{"docs": agent.StdioServer("docs-mcp")}}
+	cfg := agent.Config{Cwd: workDir, MCPServers: map[string]agent.MCPServer{"docs": agent.StdioServer("docs-mcp")}}
 	a, err := p.Start(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -231,7 +231,7 @@ func TestFormWhenMatchesOpenCode(t *testing.T) {
 
 func TestAttachedServerRefusesEnv(t *testing.T) {
 	f := newFakeServer(t)
-	_, err := f.provider().Start(context.Background(), agent.Config{Cwd: "/work", Env: map[string]string{"A": "1"}})
+	_, err := f.provider().Start(context.Background(), agent.Config{Cwd: workDir, Env: map[string]string{"A": "1"}})
 	if !errors.Is(err, agent.ErrUnsupported) {
 		t.Fatalf("err = %v", err)
 	}
@@ -245,12 +245,12 @@ func TestMCPConfigMismatchNotice(t *testing.T) {
 	f.on("PUT /api/experimental/mcp/*", func(*fakeRequest) (int, any) { return 204, nil })
 	f.on("DELETE /api/experimental/mcp/*", func(*fakeRequest) (int, any) { return 204, nil })
 	p := f.provider()
-	a, err := p.Start(context.Background(), agent.Config{Cwd: "/work", MCPServers: map[string]agent.MCPServer{"docs": agent.StdioServer("docs-mcp")}})
+	a, err := p.Start(context.Background(), agent.Config{Cwd: workDir, MCPServers: map[string]agent.MCPServer{"docs": agent.StdioServer("docs-mcp")}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer a.Close()
-	b, err := p.StartSession(context.Background(), agent.Config{Cwd: "/work", MCPServers: map[string]agent.MCPServer{"docs": agent.StdioServer("other-mcp")}})
+	b, err := p.StartSession(context.Background(), agent.Config{Cwd: workDir, MCPServers: map[string]agent.MCPServer{"docs": agent.StdioServer("other-mcp")}})
 	if err != nil {
 		t.Fatal(err)
 	}
