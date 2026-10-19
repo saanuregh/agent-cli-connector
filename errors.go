@@ -27,7 +27,8 @@ var (
 	// ErrInterrupted is matched by the error of an interrupted turn.
 	ErrInterrupted = errors.New("turn interrupted")
 	// ErrInvalidAnswer is wrapped by Respond errors for an answer with an
-	// empty or unknown decision or action. The request stays pending.
+	// empty or unknown decision or action, or a permission decision the
+	// request does not offer. The request stays pending.
 	ErrInvalidAnswer = errors.New("invalid answer")
 )
 

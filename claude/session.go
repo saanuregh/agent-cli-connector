@@ -309,8 +309,8 @@ func (s *Session) appliedEffort(ctx context.Context) agent.Effort {
 }
 
 // launch starts a CLI process, makes it the session's process, and runs
-// the initialize handshake. With MCPViaControl it then registers
-// cfg.MCPServers through mcp_set_servers.
+// the initialize handshake. It then registers cfg.MCPServers through
+// mcp_set_servers when mcpViaControl says so.
 //
 // A provisional process does not end the session when it exits; Rewind
 // uses one to try a restart and adopts it once the restart worked.
@@ -377,7 +377,7 @@ func (s *Session) launch(ctx context.Context, cfg agent.Config, opts SessionOpti
 		// already hold the level it applies.
 		init.appliedEffort = s.appliedEffort(startCtx)
 	}
-	if opts.MCPViaControl && len(mcpConfig(cfg.MCPServers)) > 0 {
+	if mcpViaControl(cfg, opts) && len(mcpConfig(cfg.MCPServers)) > 0 {
 		res, err := s.SetMCPServers(startCtx, cfg.MCPServers)
 		if err != nil {
 			return nil, fmt.Errorf("claude: register MCP servers: %w", err)
@@ -490,22 +490,37 @@ func (s *Session) setCapabilities(caps []string) {
 // emit queues ev and records the items each turn produces for Rewind. The
 // runtime stamps the turn before the item is recorded.
 func (s *Session) emit(ev agent.Event) {
-	s.rt.Emit(ev)
-	var item agent.Item
+	var item *agent.Item
 	switch ev := ev.(type) {
-	case *agent.TaskUpdated:
-		s.tasks.Store(ev.Task.ID, true)
-		return
 	case *agent.ItemStarted:
-		item = ev.Item
+		item = &ev.Item
 	case *agent.ItemUpdated:
-		item = ev.Item
+		item = &ev.Item
 	case *agent.ItemCompleted:
-		item = ev.Item
-	default:
-		return
+		item = &ev.Item
 	}
-	s.turnItems.add(ev.Meta().TurnID, item.ID)
+	if item != nil {
+		// Items carry their turn, as history items do.
+		m := ev.Meta()
+		m.TurnID = cmp.Or(m.TurnID, item.TurnID, s.eventTurn())
+		item.TurnID = m.TurnID
+	}
+	s.rt.Emit(ev)
+	if t, ok := ev.(*agent.TaskUpdated); ok {
+		s.tasks.Store(t.Task.ID, true)
+	}
+	if item != nil {
+		s.turnItems.add(ev.Meta().TurnID, item.ID)
+	}
+}
+
+// eventTurn returns the turn the runtime stamps on an event without one:
+// the running turn, else the oldest unfinished one.
+func (s *Session) eventTurn() string {
+	if id, _ := s.rt.Running(); id != "" {
+		return id
+	}
+	return s.rt.CurrentTurnID()
 }
 
 // Initialization returns the initialize response: commands, models,

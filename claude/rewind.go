@@ -260,8 +260,8 @@ func (s *Session) restartRewind(ctx context.Context, g *transcriptGraph, target 
 }
 
 // retireProcess stops the running CLI process, withdraws its pending
-// requests, and gives the session a fresh translator that keeps the item
-// lookups.
+// requests, ends its tasks and open items, and gives the session a fresh
+// translator that keeps the item lookups.
 func (s *Session) retireProcess() {
 	old := s.current()
 	old.retired.Store(true)
@@ -287,6 +287,10 @@ func (s *Session) retireProcess() {
 	}
 	prev := s.translator()
 	prev.stop()
+	// The old process's background work dies with it; nothing else would
+	// end its tasks and open calls.
+	prev.endRunningTasks(agent.TaskStopped, "the claude process restarted")
+	prev.endOpenItems(agent.ItemCancelled, false, "")
 	tr := newTranslator(s)
 	tr.keepLookups(prev)
 	s.procMu.Lock()

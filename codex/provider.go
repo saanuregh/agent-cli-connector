@@ -98,8 +98,8 @@ func (p *Provider) StartSession(ctx context.Context, cfg agent.Config) (*Session
 		return nil, agentError("ForkAtTurn requires Fork")
 	}
 	// Refused before an app-server starts.
-	if len(cfg.DisallowedTools) > 0 {
-		return nil, providerkit.Unsupported(Name, "DisallowedTools")
+	if err := refusedConfig(cfg, !p.opts.SharedServer); err != nil {
+		return nil, err
 	}
 	if _, err := providerkit.IgnoredConfig(Name, cfg, ignoredConfig(cfg, !p.opts.SharedServer, !p.opts.DisableExperimentalAPI)); err != nil {
 		return nil, err
@@ -395,11 +395,17 @@ func readLatestTurns(ctx context.Context, c *Client, threadID string, want int) 
 // when opts.SubagentID is set. Items carry their turn ID, and their time
 // when Codex recorded one, else their turn's start (user messages) or
 // completion time. With opts.Limit it reads only the newest turns it
-// needs.
+// needs. Items an interrupted or failed turn left in progress come back
+// cancelled or failed. A subagent's items carry the item that spawned it
+// as ParentID when its parent thread's history names it.
 func (p *Provider) ReadHistory(ctx context.Context, sessionID string, opts agent.ReadHistoryOptions) ([]agent.Item, error) {
 	target := cmp.Or(opts.SubagentID, sessionID)
 	var out []agent.Item
 	err := p.withClient(ctx, func(c *Client) error {
+		var parent string
+		if opts.SubagentID != "" {
+			parent = spawnItem(ctx, c, sessionID, opts.SubagentID)
+		}
 		var turns []historyTurn
 		var err error
 		if opts.Limit > 0 {
@@ -417,14 +423,63 @@ func (p *Provider) ReadHistory(ctx context.Context, sessionID string, opts agent
 			for _, raw := range turn.Items {
 				it, _ := convertItem(raw)
 				it.TurnID = turn.ID
+				it.ParentID = parent
 				it.SubagentID = opts.SubagentID
 				it.Time = itemTime(raw, it.Kind, turn)
+				endStoppedItem(&it, turn.Status)
 				out = append(out, it)
 			}
 		}
 		return nil
 	})
 	return providerutil.LastPage(out, opts.Limit, opts.Offset), err
+}
+
+// endStoppedItem ends an item that an interrupted or failed turn left in
+// progress, as the live session does when the turn ends.
+func endStoppedItem(it *agent.Item, turnStatus string) {
+	if it.Status != agent.ItemRunning {
+		return
+	}
+	switch turnStatus {
+	case "interrupted":
+		it.Status = agent.ItemCancelled
+	case "failed":
+		it.Status = agent.ItemFailed
+		if it.Tool != nil {
+			call := *it.Tool
+			call.IsError = true
+			it.Tool = &call
+		}
+	}
+}
+
+// spawnItem returns the item that spawned the subagent thread, read from
+// the history of its parent thread (sessionID when Codex does not name
+// one), or "" when that history does not name it.
+func spawnItem(ctx context.Context, c *Client, sessionID, subagent string) string {
+	var resp struct {
+		Thread struct {
+			ParentThreadID *string `json:"parentThreadId"`
+		} `json:"thread"`
+	}
+	parent := sessionID
+	if c.Call(ctx, "thread/read", map[string]any{"threadId": subagent, "includeTurns": false}, &resp) == nil {
+		parent = cmp.Or(providerutil.Deref(resp.Thread.ParentThreadID), sessionID)
+	}
+	turns, err := readTurns(ctx, c, parent)
+	if err != nil {
+		return ""
+	}
+	task := newSubagentTask(subagent)
+	for _, turn := range turns {
+		for _, raw := range turn.Items {
+			for _, change := range subagentChanges(raw, "", 0, func(thread string) bool { return thread != subagent }) {
+				change.apply(task)
+			}
+		}
+	}
+	return task.ToolCallID
 }
 
 // itemTime returns an item's own timestamp, or its turn's time.

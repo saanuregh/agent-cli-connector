@@ -18,7 +18,8 @@ import (
 )
 
 // translator turns stdout messages into events. It runs on the reader
-// goroutine only, except for the cost fields guarded by mu.
+// goroutine, except for the fields guarded by taskMu and mu, which other
+// goroutines also use.
 type translator struct {
 	s *Session
 
@@ -30,10 +31,13 @@ type translator struct {
 	streamMessage map[string]string
 	// frames counts assistant frames per message ID; frame n carries
 	// content block n.
-	frames map[string]int
+	frames map[string]messageFrames
 	// tools holds tool calls waiting for their results.
 	tools map[string]*agent.Item
-	tasks map[string]*agent.Task
+	// toolTurn maps a tool call to the turn it started in, for calls that
+	// finish later, such as background Agent calls.
+	toolTurn map[string]string
+	tasks    map[string]*agent.Task
 	// agents maps a spawning tool call to the subagent it started.
 	agents map[string]string
 	// plan mirrors the TaskCreate/TaskUpdate task list.
@@ -42,11 +46,11 @@ type translator struct {
 	startedTurns map[string]bool
 	lastInit     string
 
-	// pendingSub holds items of subagent frames that arrived before
-	// task_started named their subagent, by parent tool call; subModel is
-	// the model of such a subagent's first frame.
-	pendingSub map[string][]agent.Item
-	subModel   map[string]string
+	// pendingSubagentItems holds items of subagent frames that arrived
+	// before task_started named their subagent, by parent tool call;
+	// subagentModels is the model of such a subagent's first frame.
+	pendingSubagentItems map[string][]heldItem
+	subagentModels       map[string]string
 	// tails are the running shell output tails by tool call.
 	tailMu sync.Mutex
 	tails  map[string]*outputTail
@@ -87,46 +91,64 @@ type translator struct {
 	taskMu        sync.Mutex
 	pendingEffort map[string]agent.Effort
 
+	// mu guards lastCost, the Rewind lookups below, and overageLimit,
+	// which Rewind and control calls use from other goroutines.
 	mu       sync.Mutex
 	lastCost float64
 	// messageItems maps a wire message UUID to the items it produced and
 	// itemMessage maps back; cursors maps a turn to its latest main
-	// assistant message UUID.
+	// assistant message UUID. They grow with the conversation, because
+	// Rewind resolves any of its items and turns, and are cleared when
+	// the conversation is reset.
 	messageItems map[string][]string
 	itemMessage  map[string]string
 	cursors      map[string]string
-	// toolTurn maps a tool call to the turn it started in, for calls that
-	// finish later, such as background Agent calls.
-	toolTurn map[string]string
 	// overageLimit names the model-scoped allowance get_usage reported,
 	// which rate-limit events call "seven_day_overage_included".
 	overageLimit string
 }
 
 type blockRef struct {
-	itemID string
-	kind   agent.ItemKind
+	itemID           string
+	kind             agent.ItemKind
+	parent, subagent string
+}
+
+// messageFrames counts the assistant frames of one message and records
+// the parent tool call of its thread.
+type messageFrames struct {
+	n      int
+	parent string
+}
+
+// heldItem is an item of a subagent frame that arrived before
+// task_started named its subagent. A done item's ItemCompleted waits for
+// the subagent, so the completion carries its SubagentID and stays final.
+type heldItem struct {
+	item agent.Item
+	meta agent.EventMeta
+	done bool
 }
 
 func newTranslator(s *Session) *translator {
 	return &translator{
-		s:             s,
-		blocks:        make(map[string]blockRef),
-		streamMessage: make(map[string]string),
-		frames:        make(map[string]int),
-		tools:         make(map[string]*agent.Item),
-		tasks:         make(map[string]*agent.Task),
-		agents:        make(map[string]string),
-		startedTurns:  make(map[string]bool),
-		pendingSub:    make(map[string][]agent.Item),
-		subModel:      make(map[string]string),
-		tails:         make(map[string]*outputTail),
-		messageItems:  make(map[string][]string),
-		itemMessage:   make(map[string]string),
-		cursors:       make(map[string]string),
-		toolTurn:      make(map[string]string),
-		hidden:        make(map[string]bool),
-		pendingEffort: make(map[string]agent.Effort),
+		s:                    s,
+		blocks:               make(map[string]blockRef),
+		streamMessage:        make(map[string]string),
+		frames:               make(map[string]messageFrames),
+		tools:                make(map[string]*agent.Item),
+		tasks:                make(map[string]*agent.Task),
+		agents:               make(map[string]string),
+		startedTurns:         make(map[string]bool),
+		pendingSubagentItems: make(map[string][]heldItem),
+		subagentModels:       make(map[string]string),
+		tails:                make(map[string]*outputTail),
+		messageItems:         make(map[string][]string),
+		itemMessage:          make(map[string]string),
+		cursors:              make(map[string]string),
+		toolTurn:             make(map[string]string),
+		hidden:               make(map[string]bool),
+		pendingEffort:        make(map[string]agent.Effort),
 	}
 }
 
@@ -304,6 +326,11 @@ func (t *translator) handle(env envelope, line []byte) {
 		}
 		// Rewind cannot reach the dropped conversation's turns any more.
 		t.s.turnItems.reset()
+		t.mu.Lock()
+		clear(t.messageItems)
+		clear(t.itemMessage)
+		clear(t.cursors)
+		t.mu.Unlock()
 		t.plan = nil
 		t.emit(&agent.ConversationReset{EventMeta: meta, Trigger: f.Trigger, NewSessionID: f.NewConversationID})
 	case "active_goal":
@@ -382,6 +409,11 @@ func (t *translator) stream(f streamFrame, meta agent.EventMeta) {
 	ev := f.Event
 	switch ev.Type {
 	case "message_start":
+		// A thread's requests run one after another, so the previous
+		// message of this thread has delivered all its frames.
+		if prev, ok := t.streamMessage[parent]; ok && prev != ev.Message.ID {
+			delete(t.frames, prev)
+		}
 		t.streamMessage[parent] = ev.Message.ID
 		if parent == "" {
 			t.request = requestUsage{}
@@ -401,13 +433,13 @@ func (t *translator) stream(f streamFrame, meta agent.EventMeta) {
 				kind = agent.ItemReasoning
 			}
 			id := key
-			t.blocks[key] = blockRef{itemID: id, kind: kind}
+			t.blocks[key] = blockRef{itemID: id, kind: kind, parent: parent, subagent: sub}
 			t.emit(&agent.ItemStarted{EventMeta: meta, Item: agent.Item{ID: id, Kind: kind, Status: agent.ItemRunning, ParentID: parent, SubagentID: sub}})
 			if kind == agent.ItemReasoning && b.Thinking != "" {
 				t.emit(&agent.ReasoningDelta{EventMeta: meta, ItemID: id, ParentID: parent, SubagentID: sub, Delta: b.Thinking})
 			}
 		case "tool_use", "server_tool_use", "mcp_tool_use":
-			t.blocks[key] = blockRef{itemID: b.ID, kind: agent.ItemToolCall}
+			t.blocks[key] = blockRef{itemID: b.ID, kind: agent.ItemToolCall, parent: parent, subagent: sub}
 			if b.Name == handbackTool {
 				t.hidden[b.ID] = true
 				return
@@ -497,16 +529,29 @@ func (t *translator) startTool(b contentBlock, parent, sub string, meta agent.Ev
 }
 
 func (t *translator) toolItem(b contentBlock, parent, sub string) *agent.Item {
+	call := toolCallOf(b, t.s.toolServerName())
+	return &agent.Item{ID: b.ID, Kind: agent.ItemToolCall, Status: agent.ItemRunning, ParentID: parent, SubagentID: sub, Tool: call}
+}
+
+// toolCallOf describes a tool_use, server_tool_use, or mcp_tool_use block,
+// for the live stream and history. An MCP connector call is named
+// "mcp__<server>__<tool>" like other MCP tools.
+func toolCallOf(b contentBlock, hostServer string) *agent.ToolCall {
 	name := b.Name
 	if b.Type == "mcp_tool_use" && b.ServerName != "" {
 		name = "mcp__" + b.ServerName + "__" + b.Name
 	}
-	call := &agent.ToolCall{Name: name, Kind: agent.ToolKind(toolKind(name, t.s.toolServerName()))}
+	call := &agent.ToolCall{Name: name, Kind: agent.ToolKind(toolKind(name, hostServer))}
 	if call.Kind == agent.ToolMCP || call.Kind == agent.ToolHost {
 		call.Server = mcpServerOf(name)
 	}
-	return &agent.Item{ID: b.ID, Kind: agent.ItemToolCall, Status: agent.ItemRunning, ParentID: parent, SubagentID: sub, Tool: call}
+	return call
 }
+
+// serverToolResultTypes are the content blocks that carry the result of a
+// server-side tool call in the assistant message itself.
+var serverToolResultTypes = []string{"web_search_tool_result", "web_fetch_tool_result", "mcp_tool_result", "code_execution_tool_result",
+	"bash_code_execution_tool_result", "text_editor_code_execution_tool_result", "advisor_tool_result", "tool_search_tool_result"}
 
 func (t *translator) assistant(f assistantFrame, meta agent.EventMeta) {
 	parent := providerutil.Deref(f.ParentToolUseID)
@@ -534,8 +579,8 @@ func (t *translator) assistant(f assistantFrame, meta agent.EventMeta) {
 		t.mainModel = m
 	}
 	for _, b := range f.Message.Content {
-		n := t.frames[msgID]
-		t.frames[msgID] = n + 1
+		n := t.frames[msgID].n
+		t.frames[msgID] = messageFrames{n: n + 1, parent: parent}
 		key := msgID + "/" + strconv.Itoa(n)
 		ref, streamed := t.blocks[key]
 		delete(t.blocks, key)
@@ -559,8 +604,7 @@ func (t *translator) assistant(f assistantFrame, meta agent.EventMeta) {
 			}
 			item := agent.Item{ID: id, Kind: kind, Status: status, ParentID: parent, SubagentID: sub, Text: text, Raw: providerutil.Raw(b)}
 			t.remember(f.UUID, id)
-			t.holdSubagentItem(parent, sub, item)
-			t.emit(&agent.ItemCompleted{EventMeta: meta, Item: item})
+			t.completeItem(item, meta)
 		case "tool_use", "server_tool_use", "mcp_tool_use":
 			if b.Name == handbackTool {
 				t.handback(b, parent, sub, f.UUID, meta)
@@ -583,13 +627,15 @@ func (t *translator) assistant(f assistantFrame, meta agent.EventMeta) {
 			t.remember(f.UUID, b.ID)
 			t.holdSubagentItem(parent, sub, *item)
 			t.emit(&agent.ItemUpdated{EventMeta: meta, Item: item.Clone()})
-			if b.Name == "TodoWrite" {
+			// A subagent's to-do list is its own, not the session plan.
+			if b.Name == "TodoWrite" && parent == "" {
 				t.emitTodos(b.ID, b.Input, meta)
 			}
-		case "web_search_tool_result", "web_fetch_tool_result", "mcp_tool_result", "code_execution_tool_result",
-			"bash_code_execution_tool_result", "text_editor_code_execution_tool_result", "advisor_tool_result", "tool_search_tool_result":
-			t.remember(f.UUID, b.ToolUseID)
-			t.completeTool(b.ToolUseID, b.Content, b.IsError || isErrorContent(b.Content), nil, "", meta)
+		default:
+			if slices.Contains(serverToolResultTypes, b.Type) {
+				t.remember(f.UUID, b.ToolUseID)
+				t.completeTool(b.ToolUseID, b.Content, b.IsError || isErrorContent(b.Content), nil, "", meta)
+			}
 		}
 	}
 	if f.Message.StopReason != nil {
@@ -610,8 +656,7 @@ func (t *translator) handback(b contentBlock, parent, sub, uuid string, meta age
 	}
 	item := agent.Item{ID: b.ID, Kind: agent.ItemAssistantMessage, Status: agent.ItemDone, ParentID: parent, SubagentID: sub, Text: in.Message, Raw: providerutil.Raw(b)}
 	t.remember(uuid, b.ID)
-	t.holdSubagentItem(parent, sub, item)
-	t.emit(&agent.ItemCompleted{EventMeta: meta, Item: item})
+	t.completeItem(item, meta)
 }
 
 // isErrorContent reports a server tool result whose content is an error,
@@ -623,18 +668,56 @@ func isErrorContent(content json.RawMessage) bool {
 	return json.Unmarshal(content, &c) == nil && strings.HasSuffix(c.Type, "_tool_result_error")
 }
 
-// holdSubagentItem keeps items of a subagent frame whose subagent is not
-// known yet, so task_started can fill in their SubagentID.
+// holdSubagentItem keeps a running item of a subagent frame whose
+// subagent is not known yet, so task_started can fill in its SubagentID.
 func (t *translator) holdSubagentItem(parent, sub string, item agent.Item) {
 	if parent == "" || sub != "" {
 		return
 	}
-	held := t.pendingSub[parent]
-	if i := slices.IndexFunc(held, func(it agent.Item) bool { return it.ID == item.ID }); i >= 0 {
-		held[i] = item
+	t.hold(parent, heldItem{item: item})
+}
+
+func (t *translator) hold(parent string, h heldItem) {
+	held := t.pendingSubagentItems[parent]
+	if i := slices.IndexFunc(held, func(x heldItem) bool { return x.item.ID == h.item.ID }); i >= 0 {
+		held[i] = h
 		return
 	}
-	t.pendingSub[parent] = append(held, item)
+	t.pendingSubagentItems[parent] = append(held, h)
+}
+
+// completeItem emits ItemCompleted, or holds it while the item belongs to
+// a subagent that task_started has not named yet.
+func (t *translator) completeItem(item agent.Item, meta agent.EventMeta) {
+	if item.ParentID != "" && item.SubagentID == "" {
+		meta.TurnID = cmp.Or(meta.TurnID, t.s.eventTurn())
+		t.hold(item.ParentID, heldItem{item: item, meta: meta, done: true})
+		return
+	}
+	t.emit(&agent.ItemCompleted{EventMeta: meta, Item: item})
+}
+
+// releaseHeldItems completes the held items of a parent call whose
+// subagent was never named, such as when the call ends first.
+func (t *translator) releaseHeldItems(parent string) {
+	for _, h := range t.pendingSubagentItems[parent] {
+		if h.done {
+			t.emit(&agent.ItemCompleted{EventMeta: h.meta, Item: h.item})
+		}
+	}
+	delete(t.pendingSubagentItems, parent)
+}
+
+// forgetThread drops the per-thread state of a finished parent tool call.
+func (t *translator) forgetThread(parent string) {
+	t.releaseHeldItems(parent)
+	delete(t.subagentModels, parent)
+	delete(t.streamMessage, parent)
+	for id, fr := range t.frames {
+		if fr.parent == parent {
+			delete(t.frames, id)
+		}
+	}
 }
 
 // subagentModel records the model a subagent's frames report.
@@ -643,8 +726,8 @@ func (t *translator) subagentModel(parent, sub, model string, meta agent.EventMe
 		return
 	}
 	if sub == "" {
-		if t.subModel[parent] == "" {
-			t.subModel[parent] = model
+		if t.subagentModels[parent] == "" {
+			t.subagentModels[parent] = model
 		}
 		return
 	}
@@ -681,6 +764,13 @@ const maxPendingEffort = 256
 // failRunningTasks reports the tasks still running as failed, because
 // they die with the CLI process. It runs after the read loop ended.
 func (t *translator) failRunningTasks() {
+	t.endRunningTasks(agent.TaskFailed, "the claude process exited")
+}
+
+// endRunningTasks ends the tasks still running with status, and completes
+// the spawning calls of background subagents among them. It runs after
+// the read loop ended.
+func (t *translator) endRunningTasks(status agent.TaskStatus, reason string) {
 	t.taskMu.Lock()
 	defer t.taskMu.Unlock()
 	for _, id := range slices.Sorted(maps.Keys(t.tasks)) {
@@ -688,10 +778,83 @@ func (t *translator) failRunningTasks() {
 		if task.Status != agent.TaskRunning {
 			continue
 		}
-		task.Status = agent.TaskFailed
-		task.Error = cmp.Or(task.Error, "the claude process exited")
+		task.Status = status
+		task.Error = cmp.Or(task.Error, reason)
 		t.emit(&agent.TaskUpdated{Task: task.Clone()})
+		t.completeAsyncCall(task, agent.EventMeta{})
 	}
+}
+
+// endOpenItems completes the items left open: streamed blocks that no
+// assistant frame closed get blockStatus, and tool calls without a result
+// are cancelled. With keepBackground, the items of background subagents,
+// which outlive the turn, stay open, and so does the call keep, which the
+// CLI deferred to the host.
+func (t *translator) endOpenItems(blockStatus agent.ItemStatus, keepBackground bool, keep string) {
+	for _, key := range slices.Sorted(maps.Keys(t.blocks)) {
+		ref := t.blocks[key]
+		if keepBackground && (t.inBackground(ref.parent) || t.backgroundTask(ref.subagent)) {
+			continue
+		}
+		delete(t.blocks, key)
+		if ref.kind == agent.ItemToolCall {
+			continue
+		}
+		t.completeItem(agent.Item{ID: ref.itemID, Kind: ref.kind, Status: blockStatus, ParentID: ref.parent, SubagentID: ref.subagent}, agent.EventMeta{})
+	}
+	for _, id := range slices.Sorted(maps.Keys(t.tools)) {
+		item, ok := t.tools[id]
+		if !ok || id == keep || keepBackground && (t.inBackground(id) || t.backgroundTask(item.SubagentID)) {
+			continue
+		}
+		t.stopTail(id)
+		delete(t.tools, id)
+		meta := agent.EventMeta{TurnID: t.toolTurn[id]}
+		delete(t.toolTurn, id)
+		t.forgetThread(id)
+		item.Status = agent.ItemCancelled
+		t.completeItem(*item, meta)
+	}
+	for _, parent := range slices.Sorted(maps.Keys(t.pendingSubagentItems)) {
+		if !keepBackground || !t.inBackground(parent) {
+			t.releaseHeldItems(parent)
+		}
+	}
+	for id, fr := range t.frames {
+		if !keepBackground || !t.inBackground(fr.parent) {
+			delete(t.frames, id)
+		}
+	}
+}
+
+// inBackground reports whether parent is, or runs inside, the spawning call
+// of a background subagent: a call its launch acknowledgement left open.
+func (t *translator) inBackground(parent string) bool {
+	for range maxSubagentDepth {
+		call, ok := t.tools[parent]
+		if parent == "" || !ok {
+			return false
+		}
+		if call.Tool != nil && len(call.Tool.OutputData) > 0 {
+			return true
+		}
+		parent = call.ParentID
+	}
+	return false
+}
+
+// maxSubagentDepth bounds the walk up nested subagent calls.
+const maxSubagentDepth = 16
+
+// backgroundTask reports whether id is a running background subagent.
+func (t *translator) backgroundTask(id string) bool {
+	if id == "" {
+		return false
+	}
+	t.taskMu.Lock()
+	defer t.taskMu.Unlock()
+	task, ok := t.tasks[id]
+	return ok && task.Status == agent.TaskRunning && task.Subagent != nil && task.Subagent.Background
 }
 
 func textOfBlocks(blocks []contentBlock) string {
@@ -865,7 +1028,7 @@ func (t *translator) user(f userFrame, meta agent.EventMeta) {
 		var text string
 		if json.Unmarshal(f.Message.Content, &text) == nil && text != "" && !isTranscriptNoise(text) && !isCommandEcho(text) {
 			synthetic := f.IsSynthetic || isInjectedPrompt(text)
-			t.emit(&agent.ItemCompleted{EventMeta: meta, Item: agent.Item{ID: f.UUID, Kind: agent.ItemUserMessage, Status: agent.ItemDone, ParentID: parent, SubagentID: sub, Text: text, Synthetic: synthetic}})
+			t.completeItem(agent.Item{ID: f.UUID, Kind: agent.ItemUserMessage, Status: agent.ItemDone, ParentID: parent, SubagentID: sub, Text: text, Synthetic: synthetic}, meta)
 		}
 		return
 	}
@@ -895,7 +1058,7 @@ func (t *translator) user(f userFrame, meta agent.EventMeta) {
 	text := strings.Join(texts, "\n")
 	switch {
 	case parent != "" && !f.IsSynthetic:
-		t.emit(&agent.ItemCompleted{EventMeta: meta, Item: agent.Item{ID: f.UUID, Kind: agent.ItemUserMessage, Status: agent.ItemDone, ParentID: parent, SubagentID: sub, Text: text}})
+		t.completeItem(agent.Item{ID: f.UUID, Kind: agent.ItemUserMessage, Status: agent.ItemDone, ParentID: parent, SubagentID: sub, Text: text}, meta)
 	case parent == "" && (f.IsSynthetic || isInjectedPrompt(text)) && !isTranscriptNoise(text) && !isCommandEcho(text):
 		// The host's own prompts are not echoed; these the CLI added.
 		t.emit(&agent.ItemCompleted{EventMeta: meta, Item: agent.Item{ID: f.UUID, Kind: agent.ItemUserMessage, Status: agent.ItemDone, Text: text, Synthetic: true}})
@@ -915,14 +1078,35 @@ func isCommandEcho(text string) bool {
 	return strings.Contains(text, "<command-name>") || strings.Contains(text, "<command-message>")
 }
 
-// completeTool finishes a tool call with its result. nonExecution is the
-// CLI's reason a call did not run, such as "cancelled".
+// completeTool finishes a tool call with its result; see applyToolResult.
 func (t *translator) completeTool(id string, content json.RawMessage, isError bool, structured json.RawMessage, nonExecution string, meta agent.EventMeta) {
 	item, ok := t.tools[id]
 	if !ok {
 		return
 	}
 	t.stopTail(id)
+	applyToolResult(item, content, isError, structured, nonExecution)
+	if item.Status == agent.ItemRunning {
+		// The subagent runs on; its task notification completes the call.
+		t.emit(&agent.ItemUpdated{EventMeta: meta, Item: item.Clone()})
+		t.toolEffects(item, structured, meta)
+		return
+	}
+	delete(t.tools, id)
+	delete(t.toolTurn, id)
+	t.forgetThread(id)
+	t.completeItem(*item, meta)
+	if !isError {
+		t.toolEffects(item, structured, meta)
+	}
+}
+
+// applyToolResult fills in a tool call's result, shared by the live stream
+// and history: the output, the file changes and shell details the
+// structured result (toolUseResult) adds, and the final status. A
+// background Agent launch stays running. nonExecution is the CLI's reason
+// a call did not run, such as "cancelled".
+func applyToolResult(item *agent.Item, content json.RawMessage, isError bool, structured json.RawMessage, nonExecution string) {
 	item.Tool.Output, item.Tool.Images = toolResultContent(content)
 	item.Tool.IsError = isError
 	if len(structured) > 0 && string(structured) != "null" {
@@ -948,17 +1132,10 @@ func (t *translator) completeTool(id string, content json.RawMessage, isError bo
 			}
 		case agent.ToolSubagent:
 			if !isError && isAsyncLaunch(structured) {
-				// The subagent runs on; its task notification completes the
-				// call.
-				t.emit(&agent.ItemUpdated{EventMeta: meta, Item: item.Clone()})
-				t.toolEffects(item, structured, meta)
 				return
 			}
 		}
 	}
-	delete(t.tools, id)
-	delete(t.toolTurn, id)
-	delete(t.pendingSub, id)
 	if nonExecution == "cancelled" {
 		item.Status = agent.ItemCancelled
 	}
@@ -967,10 +1144,6 @@ func (t *translator) completeTool(id string, content json.RawMessage, isError bo
 		if isError {
 			item.Status = agent.ItemFailed
 		}
-	}
-	t.emit(&agent.ItemCompleted{EventMeta: meta, Item: *item})
-	if !isError {
-		t.toolEffects(item, structured, meta)
 	}
 }
 
@@ -1011,13 +1184,20 @@ func (t *translator) toolEffects(item *agent.Item, structured json.RawMessage, m
 		if json.Unmarshal(structured, &out) != nil || out.AgentID == "" {
 			return
 		}
-		t.agents[item.ID] = out.AgentID
+		if item.Status == agent.ItemRunning {
+			// Only a background subagent's frames follow its call's result.
+			t.agents[item.ID] = out.AgentID
+		}
 		t.taskMu.Lock()
 		defer t.taskMu.Unlock()
 		if task, ok := t.tasks[out.AgentID]; ok && task.Subagent != nil && out.ResolvedModel != "" && task.Subagent.Model != out.ResolvedModel {
 			task.Subagent.Model = out.ResolvedModel
 			t.emit(&agent.TaskUpdated{EventMeta: meta, Task: task.Clone()})
 		}
+		return
+	}
+	if item.ParentID != "" {
+		// A subagent's task list calls do not change the session plan.
 		return
 	}
 	if plan, ok := applyPlanTool(t.plan, item.Tool.Name, item.Tool.Input, structured); ok {
@@ -1196,6 +1376,16 @@ func (t *translator) result(f resultFrame, line []byte) {
 		}
 	}
 	t.turnError, t.turnErrorText = "", ""
+
+	blockStatus := agent.ItemCancelled
+	if res.Status == agent.TurnSucceeded {
+		blockStatus = agent.ItemDone
+	}
+	deferred := ""
+	if f.DeferredToolUse != nil {
+		deferred = f.DeferredToolUse.ID
+	}
+	t.endOpenItems(blockStatus, true, deferred)
 
 	ids := f.UserMessageUUIDs
 	if len(ids) == 0 && f.UserMessageUUID != "" {
@@ -1720,6 +1910,9 @@ func (t *translator) task(kind string, line []byte, meta agent.EventMeta) {
 	}
 	if task.Status != agent.TaskRunning && kind == "task_notification" {
 		delete(t.tasks, f.TaskID)
+		if t.agents[task.ToolCallID] == task.ID {
+			delete(t.agents, task.ToolCallID)
+		}
 	}
 }
 
@@ -1744,20 +1937,26 @@ func (t *translator) bindSubagent(task *agent.Task, meta agent.EventMeta) {
 			}
 		}
 	}
-	if m := t.subModel[task.ToolCallID]; m != "" {
+	if m := t.subagentModels[task.ToolCallID]; m != "" {
 		sa.Model = m
 	}
-	delete(t.subModel, task.ToolCallID)
+	delete(t.subagentModels, task.ToolCallID)
 	for _, it := range t.tools {
 		if it.ParentID == task.ToolCallID && it.SubagentID == "" {
 			it.SubagentID = task.ID
 		}
 	}
-	for _, it := range t.pendingSub[task.ToolCallID] {
-		it.SubagentID = task.ID
-		t.emit(&agent.ItemUpdated{EventMeta: meta, Item: it})
+	// Held completions are announced now, with the subagent; running calls
+	// were announced already and are updated.
+	for _, h := range t.pendingSubagentItems[task.ToolCallID] {
+		if h.done {
+			h.item.SubagentID = task.ID
+			t.emit(&agent.ItemCompleted{EventMeta: h.meta, Item: h.item})
+		} else if call, ok := t.tools[h.item.ID]; ok {
+			t.emit(&agent.ItemUpdated{EventMeta: meta, Item: call.Clone()})
+		}
 	}
-	delete(t.pendingSub, task.ToolCallID)
+	delete(t.pendingSubagentItems, task.ToolCallID)
 }
 
 // completeAsyncCall completes a background subagent's spawning call, which
@@ -1768,6 +1967,8 @@ func (t *translator) completeAsyncCall(task *agent.Task, meta agent.EventMeta) {
 		return
 	}
 	delete(t.tools, task.ToolCallID)
+	delete(t.agents, task.ToolCallID)
+	t.forgetThread(task.ToolCallID)
 	// The call belongs to the turn that made it, not the one running now.
 	meta.TurnID = t.toolTurn[task.ToolCallID]
 	delete(t.toolTurn, task.ToolCallID)

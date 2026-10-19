@@ -446,12 +446,23 @@ func (p *Provider) ReadHistory(ctx context.Context, sessionID string, opts agent
 
 func historyItems(chain []sessionEntry) []agent.Item {
 	var items []agent.Item
+	// tools holds the tool calls awaiting their results, by call ID.
 	tools := map[string]int{}
+	// cancelPending ends the calls whose results never came, as the live
+	// session does when the run settles; a call still awaiting its result
+	// at the end of the branch may still be running.
+	cancelPending := func() {
+		for id, idx := range tools {
+			items[idx].Status = agent.ItemCancelled
+			delete(tools, id)
+		}
+	}
 	var turn string
 	for _, e := range chain {
 		start := len(items)
 		switch e.Type {
 		case "compaction", "branch_summary":
+			cancelPending()
 			items = append(items, agent.Item{ID: e.ID, Kind: agent.ItemCompaction, Status: agent.ItemDone, Text: e.Summary})
 		case "custom_message":
 			if e.Display != nil && *e.Display {
@@ -462,6 +473,9 @@ func historyItems(chain []sessionEntry) []agent.Item {
 			var m piMessage
 			if json.Unmarshal(e.Message, &m) != nil {
 				continue
+			}
+			if m.Role != "toolResult" {
+				cancelPending()
 			}
 			if m.Role == "user" {
 				turn = e.ID
@@ -492,8 +506,14 @@ func appendHistory(items []agent.Item, tools map[string]int, id string, m piMess
 			case "toolCall":
 				call := &agent.ToolCall{Name: b.Name, Kind: toolKind(b.Name, nil), Input: b.Arguments}
 				fillToolDetails(call, b.Arguments)
-				tools[b.ID] = len(items)
-				items = append(items, agent.Item{ID: b.ID, Kind: agent.ItemToolCall, Status: agent.ItemRunning, Tool: call})
+				status := agent.ItemRunning
+				if m.StopReason == "aborted" || m.StopReason == "error" {
+					// Pi runs no tool call of a message that failed.
+					status = agent.ItemCancelled
+				} else {
+					tools[b.ID] = len(items)
+				}
+				items = append(items, agent.Item{ID: b.ID, Kind: agent.ItemToolCall, Status: status, Tool: call})
 			}
 		}
 	case "toolResult":
@@ -503,8 +523,9 @@ func appendHistory(items []agent.Item, tools map[string]int, id string, m piMess
 		}
 		_ = json.Unmarshal(raw, &tr)
 		if idx, ok := tools[tr.ToolCallID]; ok {
+			delete(tools, tr.ToolCallID)
 			it := &items[idx]
-			it.Tool.Output = m.text()
+			it.Tool.Output, it.Tool.Images = resultContent(raw)
 			it.Tool.IsError = tr.IsError
 			applyToolResult(it.Tool, raw)
 			it.Status = agent.ItemDone
@@ -517,8 +538,10 @@ func appendHistory(items []agent.Item, tools map[string]int, id string, m piMess
 			items = append(items, agent.Item{ID: id, Kind: agent.ItemOther, Status: agent.ItemDone, Text: m.text(), Raw: raw})
 		}
 	case "bashExecution":
-		call := &agent.ToolCall{Name: "bash", Kind: agent.ToolShell, Command: m.Command, Output: m.Output, ExitCode: m.ExitCode}
-		items = append(items, agent.Item{ID: id, Kind: agent.ItemToolCall, Status: agent.ItemDone, Tool: call, Raw: raw})
+		input, _ := json.Marshal(map[string]any{"command": m.Command})
+		item := agent.Item{ID: id, Kind: agent.ItemToolCall, Tool: &agent.ToolCall{Name: "bash", Kind: agent.ToolShell, Command: m.Command, Input: input}, Raw: raw}
+		bashOutcome(&item, m.Output, m.ExitCode, m.Cancelled)
+		items = append(items, item)
 	}
 	return items
 }
@@ -651,16 +674,26 @@ func (p *Provider) findSession(sessionID, cwd string) (string, error) {
 	}
 	abs := providerutil.AbsDir(cwd)
 	root, perCwd := p.sessionsDir(abs)
-	pattern := "*_" + sessionID + ".jsonl"
+	// Pi names files "<timestamp>_<id>.jsonl" and IDs may contain "_", so
+	// the name only narrows the search: the header must carry the ID.
+	suffix := "_" + sessionID + ".jsonl"
+	matches := func(path string) bool {
+		if !strings.HasSuffix(filepath.Base(path), suffix) {
+			return false
+		}
+		e, ok := readSessionHeader(path)
+		return ok && e.ID == sessionID
+	}
 	if cwd != "" && perCwd {
-		matches, _ := filepath.Glob(filepath.Join(root, cwdDirName(abs), pattern))
-		if len(matches) > 0 {
-			return matches[0], nil
+		candidates, _ := filepath.Glob(filepath.Join(root, cwdDirName(abs), "*"+suffix))
+		for _, path := range candidates {
+			if matches(path) {
+				return path, nil
+			}
 		}
 	}
-	suffix := "_" + sessionID + ".jsonl"
 	for _, f := range sessionFiles(root) {
-		if strings.HasSuffix(filepath.Base(f.Path), suffix) {
+		if matches(f.Path) {
 			return f.Path, nil
 		}
 	}

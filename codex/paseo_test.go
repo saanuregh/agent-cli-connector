@@ -425,7 +425,7 @@ func TestListingHistoryAndSubagents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 3 || items[0].ClientID != "client-7" || items[0].TurnID != "ct1" || items[0].SubagentID != child ||
+	if len(items) != 3 || items[0].ClientID != "client-7" || items[0].TurnID != "ct1" || items[0].SubagentID != child || items[0].ParentID != "act1" ||
 		items[0].Time.Unix() != 1700000000 || items[1].Time.Unix() != 1700000060 {
 		t.Errorf("history = %+v", items)
 	}

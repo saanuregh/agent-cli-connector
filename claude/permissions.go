@@ -128,11 +128,8 @@ func (s *Session) handlePermission(ctx context.Context, requestID string, raw js
 	if d.BlockedPath != "" {
 		paths = append(paths, d.BlockedPath)
 	}
-	decisions := []agent.PermissionDecision{agent.DecisionAllow, agent.DecisionAllowSession, agent.DecisionDeny, agent.DecisionCancel}
-	switch {
-	case d.SuppressAlwaysAllow:
-		decisions = []agent.PermissionDecision{agent.DecisionAllow, agent.DecisionDeny, agent.DecisionCancel}
-	case len(d.Suggestions) > 0:
+	decisions := []agent.PermissionDecision{agent.DecisionAllow, agent.DecisionDeny, agent.DecisionCancel}
+	if d.offersRules() {
 		decisions = []agent.PermissionDecision{agent.DecisionAllow, agent.DecisionAllowSession, agent.DecisionAllowAlways, agent.DecisionDeny, agent.DecisionCancel}
 	}
 	req := providerkit.NewPermissionRequest(agent.PermissionRequest{
@@ -157,6 +154,16 @@ func (s *Session) handlePermission(ctx context.Context, requestID string, raw js
 	s.rt.Request(req)
 }
 
+// offersRules reports whether the request can be allowed with a rule:
+// only the CLI's own suggestions are scoped to this call (such as one
+// command prefix), and suppress_always_allow_rule forbids rules.
+func (d PermissionDetails) offersRules() bool {
+	return len(d.Suggestions) > 0 && !d.SuppressAlwaysAllow
+}
+
+// permissionResult answers a permission request. AllowSession and
+// AllowAlways without rules to offer allow the one call, because a rule
+// made up here would allow every call of the tool.
 func permissionResult(d PermissionDetails, resp agent.PermissionResponse) any {
 	if resp.ProviderResponse != nil {
 		return resp.ProviderResponse
@@ -168,12 +175,12 @@ func permissionResult(d PermissionDetails, resp agent.PermissionResponse) any {
 			input = resp.UpdatedInput
 		}
 		r := PermissionResult{Behavior: "allow", UpdatedInput: input, ToolUseID: d.ToolUseID, DecisionClassification: "user_temporary"}
+		if !d.offersRules() {
+			return r
+		}
 		switch resp.Decision {
 		case agent.DecisionAllowSession:
 			r.UpdatedPermissions = withDestination(d.Suggestions, "session")
-			if len(r.UpdatedPermissions) == 0 {
-				r.UpdatedPermissions = []PermissionUpdate{{Type: "addRules", Rules: []PermissionRule{{ToolName: d.ToolName}}, Behavior: "allow", Destination: "session"}}
-			}
 			r.DecisionClassification = "user_permanent"
 		case agent.DecisionAllowAlways:
 			r.UpdatedPermissions = d.Suggestions

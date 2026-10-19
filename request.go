@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sync"
 )
 
@@ -157,8 +158,9 @@ const (
 // PermissionDecision is the answer to a permission request.
 type PermissionDecision string
 
-// Permission decisions. Harnesses without session or persistent grants
-// treat AllowSession and AllowAlways as Allow.
+// Permission decisions. PermissionRequest.Decisions lists the ones a
+// request accepts. Harnesses without session or persistent grants that
+// still accept AllowSession or AllowAlways treat them as Allow.
 const (
 	// DecisionAllow allows this one call.
 	DecisionAllow PermissionDecision = "allow"
@@ -218,6 +220,9 @@ type PermissionRequest struct {
 	// Plan is the proposed plan of a plan approval.
 	Plan string
 	// Decisions lists the decisions the harness accepts for this request.
+	// When it is not empty, Respond refuses any other decision except
+	// DecisionDeny and DecisionCancel, which are always accepted so a
+	// call can always be refused.
 	Decisions []PermissionDecision
 	// SubagentID is the subagent that made the call, if any.
 	SubagentID string
@@ -236,11 +241,17 @@ func newPermissionRequest(req PermissionRequest, respond func(context.Context, P
 // RequestID returns r.ID.
 func (r *PermissionRequest) RequestID() string { return r.ID }
 
-// Respond sends resp to the harness.
+// Respond sends resp to the harness. Without ProviderResponse, it returns
+// an error wrapping ErrInvalidAnswer for an unknown decision or for an
+// allowing decision that r.Decisions does not offer.
 func (r *PermissionRequest) Respond(ctx context.Context, resp PermissionResponse) error {
 	if resp.ProviderResponse == nil {
 		switch resp.Decision {
-		case DecisionAllow, DecisionAllowSession, DecisionAllowAlways, DecisionDeny, DecisionCancel:
+		case DecisionDeny, DecisionCancel:
+		case DecisionAllow, DecisionAllowSession, DecisionAllowAlways:
+			if len(r.Decisions) > 0 && !slices.Contains(r.Decisions, resp.Decision) {
+				return fmt.Errorf("%w: permission decision %q not offered (offered %v)", ErrInvalidAnswer, resp.Decision, r.Decisions)
+			}
 		default:
 			return fmt.Errorf("%w: unknown permission decision %q", ErrInvalidAnswer, resp.Decision)
 		}

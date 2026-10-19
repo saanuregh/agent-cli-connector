@@ -1,0 +1,5 @@
+# Example binaries built at the repository root with `go build ./examples/...`.
+/chat
+/daemon
+/oneshot
+/orchestrator

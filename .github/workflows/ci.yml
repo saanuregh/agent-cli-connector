@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        if: runner.os == 'Linux'
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: vet
+        run: go vet ./... && go vet -tags live ./...
+      - name: staticcheck
+        if: runner.os == 'Linux'
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 -checks all ./...
+      # The live tests need the real CLIs and accounts, so CI runs the
+      # tests against the scripted fake harnesses only.
+      - name: test
+        run: go test -race ./...

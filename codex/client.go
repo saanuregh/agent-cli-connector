@@ -383,6 +383,15 @@ func (c *Client) registerChild(threadID string, parent *Session) {
 	c.publish(threadID, parent, true)
 }
 
+// unregisterChild stops routing a subagent thread's messages to parent.
+func (c *Client) unregisterChild(threadID string, parent *Session) {
+	c.mu.Lock()
+	if c.children[threadID] == parent {
+		delete(c.children, threadID)
+	}
+	c.mu.Unlock()
+}
+
 // thread returns the session that handles messages of a thread: the
 // thread's own session or the parent of a subagent thread.
 func (c *Client) thread(id string) *Session {

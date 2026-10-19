@@ -29,7 +29,7 @@ func TestCancelDuringParentWriteStillWritesSubagents(t *testing.T) {
 	if err := sess.SetPermissionMode(ctx, agent.PermissionReadOnly); err != nil {
 		t.Fatal(err)
 	}
-	if rules := l.get("ses_child"); !slices.Contains(rules, "edit:*=deny") {
+	if rules := l.get("ses_child"); !slices.Contains(rules, "*:*=deny") {
 		t.Fatalf("readOnly reported while the subagent has %v", rules)
 	}
 }

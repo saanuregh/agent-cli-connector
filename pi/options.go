@@ -21,12 +21,18 @@
 //     Title, and DisallowedTools map to CLI flags.
 //   - PermissionMode is enforced by the bridge: an empty mode keeps Pi's
 //     default of running every tool, which Info reports as
-//     bypassPermissions; default asks before tools that are
-//     not read-only; acceptEdits also runs edit and write without asking;
-//     readOnly and plan refuse tools that are not read-only; dontAsk runs
-//     read-only tools and refuses anything else not in AllowedTools;
-//     bypassPermissions runs everything. AllowedTools run without asking
-//     in every mode.
+//     bypassPermissions; default asks before tools that are not read-only,
+//     except AllowedTools, MCP ApprovedTools, host tools without
+//     NeedsApproval, and AllowSession grants; acceptEdits also runs edit
+//     and write without asking; readOnly and plan refuse every tool that
+//     is not read-only, whatever AllowedTools and grants say; dontAsk runs
+//     read-only tools, AllowedTools, and MCP ApprovedTools, and refuses
+//     anything else; bypassPermissions runs everything. Without the
+//     bridge, or when the bridge did not load, only an empty mode and
+//     bypassPermissions are accepted.
+//   - An AllowSession answer approves the same bash command, the same
+//     path for edit and write, and the same tool otherwise. Grants end
+//     with NewSession and SwitchSession.
 //   - AdditionalDirectories is ignored, because Pi does not sandbox file
 //     access; a Notice with Code "config_ignored" says so, and
 //     Config.Strict refuses it.
@@ -50,6 +56,10 @@
 //     the session ID stays; live user message items carry their Pi entry
 //     ID as Item.ID, which Rewind and ForkAtTurn accept. Without the
 //     bridge, Rewind forks at the turn's prompt and the session ID changes.
+//   - Live assistant text and reasoning items have IDs unique to the
+//     Session value; ReadHistory gives them "<entryID>/<index>" IDs
+//     instead, because Pi assigns entry IDs only after a message ends.
+//     Tool call items carry Pi's tool call ID in both.
 //   - Interrupt clears Pi's queued steering and follow-up messages before
 //     it aborts; input queued by this library still runs afterwards.
 //   - NewSession, SwitchSession, ForkAt, Clone, and Compact hold the

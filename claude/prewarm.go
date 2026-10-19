@@ -76,8 +76,9 @@ func (sp *Spare) Err() error { return sp.s.Err() }
 // as fresh tokens), AdditionalDirectories, AppendSystemPrompt, Title, and
 // SessionOptions.Agents; Model and Effort are applied right after it.
 // Other fields were fixed by Prewarm: set ones are reported in a Notice with
-// Code "config_ignored", or refused with Config.Strict; DisallowedTools and
-// a read-only permission mode are always refused. When the CLI refuses
+// Code "config_ignored", or refused with Config.Strict; DisallowedTools,
+// UnsetEnv, and a read-only permission mode are restrictions the spare's
+// process cannot take on, so they are always refused. When the CLI refuses
 // the claim, such as for a permission mode it cannot take, the process is
 // closed and the error says why; start the session with Start instead. A
 // Model or Effort the CLI rejects leaves the session running without it
@@ -95,6 +96,9 @@ func (sp *Spare) Claim(ctx context.Context, cfg agent.Config) (*Session, error) 
 	}
 	if len(cfg.DisallowedTools) > 0 {
 		return nil, providerkit.Unsupported(Name, "DisallowedTools on a claimed spare")
+	}
+	if len(cfg.UnsetEnv) > 0 {
+		return nil, providerkit.Unsupported(Name, "UnsetEnv on a claimed spare")
 	}
 	opts, err := providerkit.SessionOptions[SessionOptions](Name, cfg.ProviderOptions)
 	if err != nil {
@@ -244,7 +248,6 @@ func claimIgnored(cfg agent.Config) []string {
 	add(len(cfg.MCPServers) > 0, "MCPServers")
 	add(len(cfg.Tools) > 0, "Tools")
 	add(len(cfg.AllowedTools) > 0, "AllowedTools")
-	add(len(cfg.UnsetEnv) > 0, "UnsetEnv")
 	h := cfg.Handlers
 	add(h.Permission != nil || h.UserInput != nil || h.Elicitation != nil, "Handlers")
 	return ignored

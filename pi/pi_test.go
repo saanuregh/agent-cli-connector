@@ -63,7 +63,9 @@ func startup(h *fakeproc.Harness) bool {
 	respond(h, st, map[string]any{"sessionId": "pi-1", "thinkingLevel": "low", "sessionName": "named",
 		"model": map[string]any{"id": "flash", "provider": "openrouter", "contextWindow": 9000}})
 	cmds := h.RecvWhere(isCommand("get_commands"))
-	respond(h, cmds, map[string]any{"commands": []any{map[string]any{"name": "fix", "description": "Fix tests", "source": "prompt"}}})
+	// The bridge's rewind command shows that the bridge loaded.
+	respond(h, cmds, map[string]any{"commands": []any{map[string]any{"name": "fix", "description": "Fix tests", "source": "prompt"},
+		map[string]any{"name": "agent-cli-rewind", "source": "extension"}}})
 	return true
 }
 

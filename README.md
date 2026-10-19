@@ -295,8 +295,9 @@ go run ./examples/daemon -addr 127.0.0.1:8080
 go run ./examples/orchestrator -planner claude -workers claude,codex "Where is error handling inconsistent?"
 ```
 
-The daemon has no authentication and runs agents with your credentials. It listens on loopback; its doc comment lists
-the endpoints with `curl` calls.
+The daemon runs agents with your credentials. Loopback does not keep out other local users or web pages in your
+browser, so every request needs the bearer token it prints at startup, and it refuses foreign `Host` and any `Origin`
+header. Its doc comment lists the endpoints with `curl` calls.
 
 `examples/chat`: type to send (input typed during a turn is queued); `/steer` and `/now` use the other deliveries, and
 Ctrl+C interrupts. Requests are answered with `y`/`n`, `/allow`, `/deny`, `/answer`, `/accept`, and `/decline`. Input
@@ -335,3 +336,7 @@ go test -tags live ./claude ./codex ./pi ./opencode  # real CLIs; spends tokens
 
 Live tests delete the sessions they create (`internal/livetest`), so they leave nothing in the harnesses' session
 stores.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

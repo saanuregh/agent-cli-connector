@@ -38,19 +38,22 @@ type Session struct {
 	nextID atomic.Uint64
 	// compacting is set between Pi's compaction_start and compaction_end.
 	compacting atomic.Bool
-	// rewindReady reports that the bridge's rewind command is loaded.
-	rewindReady atomic.Bool
-	waitMu      sync.Mutex
-	waiters     map[string]waiter
-	readDone    chan struct{}
-	closing     atomic.Bool
-	closeOnce   sync.Once
+	// bridgeLoaded reports that the session's commands list the bridge's
+	// rewind command. The bridge registers it after its tool gate, so it
+	// also shows that the gate is in place.
+	bridgeLoaded atomic.Bool
+	waitMu       sync.Mutex
+	waiters      map[string]waiter
+	readDone     chan struct{}
+	closing      atomic.Bool
+	closeOnce    sync.Once
 
 	// steerMu runs one steer at a time; the runtime tracks a single steer.
 	steerMu sync.Mutex
 	mu      sync.Mutex
 	info    agent.SessionInfo
 	mode    agent.PermissionMode
+	// allowed holds AllowSession grants by grantKey.
 	allowed map[string]bool
 	denied  map[string]bool
 	// turnStamp holds the timestamp of each turn's first user message,
@@ -204,6 +207,14 @@ func (p *Provider) startSession(ctx context.Context, cfg agent.Config, opts Sess
 	if (len(cfg.Tools) > 0 || len(cfg.MCPServers) > 0) && s.bridgeDisabled() {
 		return nil, errors.New("pi: Tools and MCPServers need the bridge extension")
 	}
+	// Pi has no permission system: without the bridge every tool runs.
+	if s.bridgeDisabled() {
+		if !gatesNothing(cfg.PermissionMode) {
+			return nil, providerkit.Unsupported(Name, "permission mode "+string(cfg.PermissionMode)+" without the bridge extension")
+		}
+	} else if err := providerkit.CheckPermissionMode(Name, cfg.PermissionMode, s.Capabilities().PermissionModes); err != nil {
+		return nil, err
+	}
 	s.tr = newTranslator(s)
 	s.rt.SetStarter(s.start)
 
@@ -248,6 +259,10 @@ func (p *Provider) startSession(ctx context.Context, cfg agent.Config, opts Sess
 		s.applyResumeModel(startCtx)
 	}
 	s.loadCommands(startCtx)
+	if err := s.checkGate(cfg.PermissionMode); err != nil {
+		s.shutdown()
+		return nil, err
+	}
 	if cfg.Fork && cfg.ForkAtTurn != "" {
 		if err := s.truncateAfter(startCtx, cfg.ForkAtTurn); err != nil {
 			s.shutdown()
@@ -1166,12 +1181,32 @@ func (s *Session) SetEffort(ctx context.Context, effort agent.Effort) error {
 	return nil
 }
 
+// gatesNothing reports whether mode runs every tool, which Pi does
+// without the bridge.
+func gatesNothing(mode agent.PermissionMode) bool {
+	return mode == "" || mode == agent.PermissionBypass
+}
+
+// checkGate refuses a mode that gates tool calls unless the bridge, whose
+// gate enforces it, is loaded. It relies on the bridge registering its
+// rewind command after its tool_call handler: Pi lists the command only
+// when the bridge loaded that far.
+func (s *Session) checkGate(mode agent.PermissionMode) error {
+	if gatesNothing(mode) || s.bridgeLoaded.Load() {
+		return nil
+	}
+	return fmt.Errorf("pi: the bridge extension did not load, so permission mode %s cannot be enforced", mode)
+}
+
 // SetPermissionMode changes how the bridge gates tool calls.
 func (s *Session) SetPermissionMode(ctx context.Context, mode agent.PermissionMode) error {
 	if s.bridgeDisabled() {
 		return providerkit.Unsupported(Name, "permission modes without the bridge extension")
 	}
 	if err := providerkit.CheckPermissionMode(Name, mode, s.Capabilities().PermissionModes); err != nil {
+		return err
+	}
+	if err := s.checkGate(mode); err != nil {
 		return err
 	}
 	s.updateInfo(agent.EventMeta{}, func(info *agent.SessionInfo) {
@@ -1483,6 +1518,19 @@ var (
 	editTools = map[string]bool{"edit": true, "write": true}
 )
 
+// grantKey is what an AllowSession answer approves: the exact command of
+// a bash call, the exact path of an edit or write, and otherwise the tool,
+// since Pi's other tools carry no narrower identity the host can check.
+func grantKey(tool, command, path string) string {
+	switch {
+	case tool == "bash":
+		return "bash\x00command\x00" + command
+	case editTools[tool]:
+		return tool + "\x00path\x00" + path
+	}
+	return tool
+}
+
 // gate decides a tool call for the bridge, asking the host when the mode
 // requires it.
 func (s *Session) gate(uiID string, req bridgeRequest, meta agent.EventMeta) {
@@ -1493,27 +1541,45 @@ func (s *Session) gate(uiID string, req bridgeRequest, meta agent.EventMeta) {
 		s.mu.Unlock()
 		return s.bridgeReply(uiID, map[string]any{"allow": false, "reason": reason})
 	}
+	var in struct {
+		Command string `json:"command"`
+		Path    string `json:"path"`
+	}
+	_ = json.Unmarshal(req.Input, &in)
+	grant := grantKey(req.ToolName, in.Command, in.Path)
 	s.mu.Lock()
 	mode := s.mode
-	preapproved := s.allowed[req.ToolName] || slices.Contains(s.cfg.AllowedTools, req.ToolName) || s.approvedMCP[req.ToolName]
+	configured := slices.Contains(s.cfg.AllowedTools, req.ToolName) || s.approvedMCP[req.ToolName]
+	granted := s.allowed[grant]
 	s.mu.Unlock()
 	// A read-only hint counts only from built-in extensions, such as MCP
 	// servers and tool search; any other extension could claim it.
 	readOnly := readTools[req.ToolName] || req.ReadOnly && strings.HasPrefix(req.Source, "builtin:")
+	hostApproved := false
 	if tool, ok := s.tools[req.ToolName]; ok {
-		preapproved = preapproved || !tool.NeedsApproval
+		hostApproved = !tool.NeedsApproval
 		readOnly = tool.ReadOnly
 	}
+	// The mode decides first, so no grant or allowed tool lifts the
+	// refusals of readOnly, plan, and dontAsk.
 	switch {
-	// Read-only tools never ask, so every mode, dontAsk included, runs them.
-	case preapproved, mode == "", mode == agent.PermissionBypass, readOnly:
+	case gatesNothing(mode), readOnly:
+		// Read-only tools never ask, so every mode, dontAsk included, runs them.
 		allow()
 		return
 	case mode == agent.PermissionReadOnly || mode == agent.PermissionPlan:
 		deny(req.ToolName + " is not allowed in read-only mode")
 		return
 	case mode == agent.PermissionDontAsk:
-		deny(req.ToolName + " is not pre-approved")
+		// Only the session's configuration pre-approves tools here.
+		if configured {
+			allow()
+		} else {
+			deny(req.ToolName + " is not pre-approved")
+		}
+		return
+	case configured, granted, hostApproved:
+		allow()
 		return
 	case mode == agent.PermissionAcceptEdits && editTools[req.ToolName]:
 		allow()
@@ -1523,11 +1589,6 @@ func (s *Session) gate(uiID string, req bridgeRequest, meta agent.EventMeta) {
 	kind := agent.PermissionTool
 	var command string
 	var changes []agent.FileChange
-	var in struct {
-		Command string `json:"command"`
-		Path    string `json:"path"`
-	}
-	_ = json.Unmarshal(req.Input, &in)
 	switch {
 	case req.ToolName == "bash":
 		kind = agent.PermissionCommand
@@ -1564,7 +1625,7 @@ func (s *Session) gate(uiID string, req bridgeRequest, meta agent.EventMeta) {
 			return err
 		case agent.DecisionAllowSession, agent.DecisionAllowAlways:
 			s.mu.Lock()
-			s.allowed[req.ToolName] = true
+			s.allowed[grant] = true
 			s.mu.Unlock()
 		}
 		answer := map[string]any{"allow": true}
@@ -1668,7 +1729,7 @@ func (s *Session) userEntry(ctx context.Context, id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, entrie := range slices.Backward(entries) {
+	for _, raw := range slices.Backward(entries) {
 		var e struct {
 			Type    string `json:"type"`
 			ID      string `json:"id"`
@@ -1677,7 +1738,7 @@ func (s *Session) userEntry(ctx context.Context, id string) (string, error) {
 				Timestamp int64  `json:"timestamp"`
 			} `json:"message"`
 		}
-		if json.Unmarshal(entrie, &e) == nil && e.Type == "message" && e.Message.Role == "user" && e.Message.Timestamp == stamp {
+		if json.Unmarshal(raw, &e) == nil && e.Type == "message" && e.Message.Role == "user" && e.Message.Timestamp == stamp {
 			return e.ID, nil
 		}
 	}
@@ -1706,7 +1767,7 @@ func (s *Session) Rewind(ctx context.Context, turnID string) error {
 // there. verb names the operation in the error an extension's cancel
 // causes.
 func (s *Session) rewindTo(ctx context.Context, entry, verb string) error {
-	if !s.bridgeDisabled() && s.rewindReady.Load() {
+	if !s.bridgeDisabled() && s.bridgeLoaded.Load() {
 		return s.rewindInPlace(ctx, entry)
 	}
 	_, cancelled, err := s.forkAt(ctx, entry)

@@ -94,6 +94,7 @@ func rulesProbes(planFile string) []probe {
 		{"webfetch", "https://x"}, {testHost + "_secret", "*"}, {"agenthost-other_x", "*"},
 		{"read", ".env"}, {"read", "secrets/k"}, {"read", "src/a.go"},
 		{"subagent", "general"}, {"browser", "*"}, {"question", "*"},
+		{testHost + "_lookup", "*"}, {"github_create_issue", "*"}, {"execute", "*"}, {"websearch", "*"}, {"glob", "*"},
 	}
 }
 
@@ -135,10 +136,10 @@ var ruleGrants = []namedGrant{
 }
 
 // rulesSession returns a session with what buildRules reads: a host tool
-// "secret", a shared server, the agents' rules, and the opening rules.
+// "secret" and a read-only one "lookup", a shared server, the agents' rules, and the opening rules.
 func rulesSession(needsApproval bool, inherited []PermissionRule, agents map[string][]PermissionRule) *Session {
 	return &Session{
-		cfg:        agent.Config{Tools: []agent.Tool{{Name: "secret", NeedsApproval: needsApproval}}},
+		cfg:        agent.Config{Tools: []agent.Tool{{Name: "secret", NeedsApproval: needsApproval}, {Name: "lookup", NeedsApproval: needsApproval, ReadOnly: true}}},
 		host:       &hostTools{name: testHost},
 		srv:        &serverLease{shared: true},
 		inherited:  inherited,
@@ -226,7 +227,7 @@ func (m rulesMatrix) run(t *testing.T) (combos, applied int) {
 								}
 							}
 							// No mode lifts an agent or config deny.
-							if mode != "" && p.action != testHost+"_secret" && m.eval(nil, agentName, p.action, p.resource) == "deny" && a != "deny" {
+							if mode != "" && !strings.HasPrefix(p.action, testHost+"_") && m.eval(nil, agentName, p.action, p.resource) == "deny" && a != "deny" {
 								t.Errorf("%s: %v, which the agent denies, is %s", name, p, a)
 							}
 						}
@@ -247,12 +248,34 @@ func (m rulesMatrix) run(t *testing.T) (combos, applied int) {
 								}
 							}
 						}
-						host := effects[probe{testHost + "_secret", "*"}]
-						switch {
-						case needsApproval && ng.name != "host-tool" && host != "ask":
-							t.Errorf("%s: a NeedsApproval host tool is %s", name, host)
-						case !needsApproval && host != "allow":
-							t.Errorf("%s: the session's own host tool is %s", name, host)
+						for _, tool := range []string{"secret", "lookup"} {
+							host := effects[probe{testHost + "_" + tool, "*"}]
+							switch {
+							case mode == agent.PermissionReadOnly && tool == "secret":
+								if host != "deny" {
+									t.Errorf("%s: a host tool that is not read-only is %s", name, host)
+								}
+							case needsApproval && (ng.name != "host-tool" || tool != "secret") && host != "ask":
+								t.Errorf("%s: a NeedsApproval host tool %s is %s", name, tool, host)
+							case !needsApproval && host != "allow":
+								t.Errorf("%s: the session's own host tool %s is %s", name, tool, host)
+							}
+						}
+						if mode == agent.PermissionReadOnly {
+							// readOnly denies all but the actions it keeps, which get
+							// the answers acceptEdits gives them.
+							kept := s.readOnlyActions()
+							edits := s.buildRules(agent.PermissionAcceptEdits, agentName, nil)
+							for _, p := range probes {
+								got := m.eval(before, agentName, p.action, p.resource)
+								want := "deny"
+								if slices.Contains(kept, p.action) {
+									want = m.eval(edits, agentName, p.action, p.resource)
+								}
+								if got != want {
+									t.Errorf("%s: readOnly answers %v with %s, want %s", name, p, got, want)
+								}
+							}
 						}
 						if other := effects[probe{"agenthost-other_x", "*"}]; other != "deny" {
 							t.Errorf("%s: another session's host tool is %s", name, other)

@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	agent "github.com/saanuregh/agent-cli-connector"
+	"github.com/saanuregh/agent-cli-connector/providerkit"
 )
 
 // Polling limits for shell output tails.
@@ -30,7 +31,8 @@ type outputTail struct {
 // startTail follows the CLI's private output file of a foreground shell
 // task: <CLAUDE_CODE_TMPDIR or the temp dir>/claude-<uid>/<project>/<session>/tasks/<task>.output.
 // When that file cannot be found, or its root directory does not exist
-// here (such as with a remote spawner), it polls get_task_output instead.
+// here (such as with a remote spawner) or is not this user's private
+// directory, it polls get_task_output instead.
 // It does nothing unless SessionOptions.TailShellOutput is set.
 func (t *translator) startTail(toolUseID, taskID string) {
 	if !t.s.opts.TailShellOutput {
@@ -39,13 +41,7 @@ func (t *translator) startTail(toolUseID, taskID string) {
 	if call, ok := t.tools[toolUseID]; !ok || call.Tool == nil || call.Tool.Kind != agent.ToolShell {
 		return
 	}
-	root := ""
-	if uid := os.Getuid(); uid >= 0 {
-		root = filepath.Join(t.s.tempDir(), "claude-"+strconv.Itoa(uid))
-		if info, err := os.Stat(root); err != nil || !info.IsDir() {
-			root = ""
-		}
-	}
+	root := t.s.shellOutputRoot()
 	tail := &outputTail{stop: make(chan struct{}), done: make(chan struct{})}
 	t.tailMu.Lock()
 	defer t.tailMu.Unlock()
@@ -68,6 +64,27 @@ func (t *translator) stopTail(toolUseID string) {
 	}
 	close(tail.stop)
 	<-tail.done
+}
+
+// shellOutputRoot returns the CLI's private temp directory,
+// <temp root>/claude-<uid>, or "" when it is missing or not ours. Another
+// user could create that directory first in a shared temp root and plant
+// files or symlinks in it, so it is used only when it is a plain directory
+// this user owns; otherwise output is polled over the control channel.
+func (s *Session) shellOutputRoot() string {
+	uid := os.Getuid()
+	if uid < 0 {
+		return ""
+	}
+	root := filepath.Join(s.tempDir(), "claude-"+strconv.Itoa(uid))
+	if _, err := os.Lstat(root); err != nil {
+		return ""
+	}
+	if err := providerkit.CheckOwnDir(root, "claude temp directory"); err != nil {
+		s.rt.Logger().Warn("not reading shell output files", "error", err)
+		return ""
+	}
+	return root
 }
 
 // tempDir is the CLI's temp root: CLAUDE_CODE_TMPDIR when set, else the

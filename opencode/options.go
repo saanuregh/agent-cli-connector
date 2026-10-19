@@ -50,7 +50,11 @@
 //     default asks before shell commands, edits, and access outside the
 //     working directory; acceptEdits does not ask before edits; plan
 //     switches to the "plan" agent, which only writes its plan; readOnly
-//     denies edits; bypassPermissions allows everything the agent and the
+//     denies every action except reading files (read, glob, grep), skills,
+//     questions, subagents, host tools marked ReadOnly, and shell commands
+//     and access outside the working directory, which ask as in
+//     acceptEdits; it also denies AllowedTools and MCP tools other than
+//     those; bypassPermissions allows everything the agent and the
 //     OpenCode config do not deny. No mode lifts an agent or config deny.
 //     An empty mode keeps the rules the session had when it was opened.
 //     Subagent sessions get the same mode for their own agent. An

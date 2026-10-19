@@ -110,3 +110,129 @@ func TestSubagentsPlansAndSharedEvents(t *testing.T) {
 		t.Errorf("goal = %+v", goal)
 	}
 }
+
+func TestSubagentTodoWriteLeavesPlan(t *testing.T) {
+	todos := func(text string) map[string]any {
+		return map[string]any{"todos": []any{map[string]any{"content": text, "status": "pending"}}}
+	}
+	spawner, _ := fakeproc.Spawner(t, func(h *fakeproc.Harness) {
+		if handshake(h) == nil {
+			return
+		}
+		uuid := startTurn(h)
+		h.Send(assistantMsg("m1", "w1", nil, map[string]any{"type": "tool_use", "id": "spawn1", "name": "Agent", "input": map[string]any{"prompt": "go"}}))
+		sub := assistantMsg("m2", "w2", "spawn1", map[string]any{"type": "tool_use", "id": "subtodo", "name": "TodoWrite", "input": todos("sub step")})
+		sub["agent_id"] = "ag1"
+		h.Send(sub)
+		h.Send(assistantMsg("m3", "w3", nil, map[string]any{"type": "tool_use", "id": "maintodo", "name": "TodoWrite", "input": todos("main step")}))
+		h.Send(map[string]any{"type": "result", "subtype": "success", "result": "ok", "user_message_uuids": []any{uuid}, "usage": map[string]any{}})
+		h.WaitClosed()
+	})
+	ctx := context.Background()
+	sess, err := claude.New(claude.Options{Spawner: spawner}).StartSession(ctx, agent.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	log := record(sess)
+	if _, err := sess.Run(ctx, agent.Text("go")); err != nil {
+		t.Fatal(err)
+	}
+	log.wait(t, "main plan", func(ev agent.Event) bool { p, ok := ev.(*agent.PlanUpdated); return ok && p.ItemID == "maintodo" })
+	for _, ev := range log.all() {
+		if p, ok := ev.(*agent.PlanUpdated); ok && p.ItemID != "maintodo" {
+			t.Errorf("plan from %s: %+v", p.ItemID, p.Steps)
+		}
+	}
+}
+
+func TestSubagentItemsBeforeTaskStartedCompleteOnce(t *testing.T) {
+	spawner, _ := fakeproc.Spawner(t, func(h *fakeproc.Harness) {
+		if handshake(h) == nil {
+			return
+		}
+		uuid := startTurn(h)
+		h.Send(assistantMsg("m1", "w1", nil, map[string]any{"type": "tool_use", "id": "spawn1", "name": "Agent", "input": map[string]any{"prompt": "go"}}))
+		// The subagent's first frames carry no agent_id and precede task_started.
+		h.Send(assistantMsg("m2", "w2", "spawn1", map[string]any{"type": "text", "text": "looking"}))
+		h.Send(assistantMsg("m3", "w3", "spawn1", map[string]any{"type": "tool_use", "id": "subls", "name": "Bash", "input": map[string]any{"command": "ls"}}))
+		sres := toolResult("w4", "subls", "a.go", false)
+		sres["parent_tool_use_id"] = "spawn1"
+		h.Send(sres)
+		h.Send(map[string]any{"type": "system", "subtype": "task_started", "task_id": "ag1", "tool_use_id": "spawn1", "task_type": "local_agent"})
+		h.Send(toolResult("w5", "spawn1", "done", false))
+		h.Send(map[string]any{"type": "result", "subtype": "success", "result": "ok", "user_message_uuids": []any{uuid}, "usage": map[string]any{}})
+		h.WaitClosed()
+	})
+	ctx := context.Background()
+	sess, err := claude.New(claude.Options{Spawner: spawner}).StartSession(ctx, agent.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	log := record(sess)
+	res, err := sess.Run(ctx, agent.Text("go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	log.wait(t, "spawn completed", completedItem("spawn1"))
+	completed := map[string]bool{}
+	for _, ev := range log.all() {
+		switch ev := ev.(type) {
+		case *agent.ItemCompleted:
+			if ev.Item.ParentID == "spawn1" && ev.Item.SubagentID != "ag1" {
+				t.Errorf("completed without subagent: %+v", ev.Item)
+			}
+			completed[ev.Item.ID] = true
+		case *agent.ItemUpdated:
+			if completed[ev.Item.ID] {
+				t.Errorf("update after completion: %+v", ev.Item)
+			}
+		}
+	}
+	if !completed["m2/0"] || !completed["subls"] {
+		t.Errorf("completed = %v", completed)
+	}
+	for _, it := range res.Items {
+		if it.ParentID == "spawn1" && it.SubagentID != "ag1" {
+			t.Errorf("turn result item without subagent: %+v", it)
+		}
+	}
+}
+
+func TestInterruptedTurnEndsOpenItems(t *testing.T) {
+	spawner, _ := fakeproc.Spawner(t, func(h *fakeproc.Harness) {
+		if handshake(h) == nil {
+			return
+		}
+		uuid := startTurn(h)
+		stream(h, map[string]any{"type": "message_start", "message": map[string]any{"id": "m1"}})
+		stream(h, map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}})
+		stream(h, map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "text_delta", "text": "partial"}})
+		stream(h, map[string]any{"type": "content_block_start", "index": 1, "content_block": map[string]any{"type": "tool_use", "id": "tu1", "name": "Bash"}})
+		h.Send(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true, "terminal_reason": "aborted_streaming",
+			"user_message_uuids": []any{uuid}, "usage": map[string]any{}})
+		h.WaitClosed()
+	})
+	ctx := context.Background()
+	sess, err := claude.New(claude.Options{Spawner: spawner}).StartSession(ctx, agent.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	go func() {
+		for range sess.Events() {
+		}
+	}()
+	res, err := sess.Run(ctx, agent.Text("go"))
+	if res == nil || res.Status != agent.TurnInterrupted {
+		t.Fatalf("result = %+v, %v", res, err)
+	}
+	status := map[string]agent.ItemStatus{}
+	for _, it := range res.Items {
+		status[it.ID] = it.Status
+	}
+	if status["m1/0"] != agent.ItemCancelled || status["tu1"] != agent.ItemCancelled {
+		t.Errorf("turn items = %+v", res.Items)
+	}
+}

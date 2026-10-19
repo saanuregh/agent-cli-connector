@@ -92,6 +92,11 @@ type translator struct {
 	children   map[string]string // child thread ID → spawning item
 	tasks      map[string]*agent.Task
 	childTurns map[string]string // child thread ID → running turn
+	// childRunning lists the started items of each child thread in start
+	// order, and childOrder lists child threads in the order they became
+	// known, so the oldest ended ones can be forgotten.
+	childRunning map[string][]agent.Item
+	childOrder   []string
 	// stopped holds recent turns that ended interrupted or failed, whose
 	// late subagent turns are interrupted too.
 	stopped []string
@@ -110,26 +115,35 @@ type translator struct {
 	// Rewind can withdraw the questions of removed turns.
 	turnOrder  []string
 	asyncTurns map[string]string
+	// turnItemIDs lists the IDs of the items reported for each turn in
+	// turnOrder, so Rewind can report them removed.
+	turnItemIDs map[string][]string
 }
 
 // maxTurnOrder bounds translator.turnOrder.
 const maxTurnOrder = 256
 
+// maxChildren bounds the child threads a translator remembers; beyond it
+// the oldest ended ones are forgotten.
+const maxChildren = 256
+
 func newTranslator(s *Session) *translator {
 	return &translator{
-		s:           s,
-		turnItems:   make(map[string][]agent.Item),
-		finalText:   make(map[string]string),
-		schemaTurns: make(map[string]bool),
-		early:       make(map[string]*agent.TurnResult),
-		items:       make(map[string]agent.Item),
-		children:    make(map[string]string),
-		tasks:       make(map[string]*agent.Task),
-		childTurns:  make(map[string]string),
-		itemTurn:    make(map[string]string),
-		retries:     make(map[string]agent.Retry),
-		rateLimits:  make(map[string]map[string]json.RawMessage),
-		asyncTurns:  make(map[string]string),
+		s:            s,
+		turnItems:    make(map[string][]agent.Item),
+		finalText:    make(map[string]string),
+		schemaTurns:  make(map[string]bool),
+		early:        make(map[string]*agent.TurnResult),
+		items:        make(map[string]agent.Item),
+		children:     make(map[string]string),
+		tasks:        make(map[string]*agent.Task),
+		childTurns:   make(map[string]string),
+		itemTurn:     make(map[string]string),
+		turnItemIDs:  make(map[string][]string),
+		childRunning: make(map[string][]agent.Item),
+		retries:      make(map[string]agent.Retry),
+		rateLimits:   make(map[string]map[string]json.RawMessage),
+		asyncTurns:   make(map[string]string),
 		// A new thread starts from zero; a resumed one has unknown totals.
 		haveTotal: s.cfg.Resume == "",
 	}
@@ -562,6 +576,7 @@ func (t *translator) turnStarted(id string, meta agent.EventMeta) {
 	if id != "" && !slices.Contains(t.turnOrder, id) {
 		t.turnOrder = append(t.turnOrder, id)
 		if len(t.turnOrder) > maxTurnOrder {
+			delete(t.turnItemIDs, t.turnOrder[0])
 			t.turnOrder = t.turnOrder[1:]
 		}
 	}
@@ -721,11 +736,12 @@ func (t *translator) item(completed bool, p turnParams, parent string, meta agen
 	it, extra := convertItem(p.Item)
 	it.ParentID = parent
 	it.TurnID = p.TurnID
-	if !completed && it.Tool == nil {
+	if !completed {
 		it.Status = agent.ItemRunning
 	}
 	s := t.s
 	s.mu.Lock()
+	t.noteItemLocked(p.TurnID, it.ID)
 	if completed {
 		if parent == "" {
 			t.turnItems[p.TurnID] = append(t.turnItems[p.TurnID], it)
@@ -869,21 +885,37 @@ func (t *translator) withdrawAsync(match func(turnID string) bool) {
 	}
 }
 
-// rewound forgets turnID and later turns after a rewind and withdraws
-// their pending async questions. Questions of turns this session did not
-// see start are withdrawn too when turnID is unknown.
+// noteItemLocked records that the item id was reported for turn, a turn
+// in turnOrder. The caller holds s.mu.
+func (t *translator) noteItemLocked(turn, id string) {
+	if turn == "" || id == "" || !slices.Contains(t.turnOrder, turn) {
+		return
+	}
+	if ids := t.turnItemIDs[turn]; !slices.Contains(ids, id) {
+		t.turnItemIDs[turn] = append(ids, id)
+	}
+}
+
+// rewound forgets turnID and later turns after a rewind, withdraws their
+// pending async questions, and reports their items removed. An unknown
+// turnID came before every turn this session saw, so all of them go.
 func (t *translator) rewound(turnID string) {
 	t.s.mu.Lock()
-	idx := slices.Index(t.turnOrder, turnID)
+	idx := max(slices.Index(t.turnOrder, turnID), 0)
 	removed := map[string]bool{}
-	if idx >= 0 {
-		for _, id := range t.turnOrder[idx:] {
-			removed[id] = true
-		}
-		t.turnOrder = t.turnOrder[:idx]
+	var ids []string
+	for _, id := range t.turnOrder[idx:] {
+		removed[id] = true
+		ids = append(ids, t.turnItemIDs[id]...)
+		delete(t.turnItemIDs, id)
 	}
+	t.turnOrder = t.turnOrder[:idx]
 	t.s.mu.Unlock()
-	t.withdrawAsync(func(turn string) bool { return idx < 0 || removed[turn] })
+	known := removed[turnID]
+	t.withdrawAsync(func(turn string) bool { return !known || removed[turn] })
+	if len(ids) > 0 {
+		t.emit(&agent.ItemsRemoved{IDs: ids})
+	}
 }
 
 // childNotify maps a subagent thread's notifications into the parent's
@@ -898,13 +930,15 @@ func (t *translator) childNotify(msg *jsonrpc.Message, p turnParams, parent stri
 		it.ParentID = parent
 		it.SubagentID = child
 		it.TurnID = p.TurnID
-		if it.Tool == nil && msg.Method == "item/started" {
+		started := msg.Method == "item/started"
+		if started {
 			it.Status = agent.ItemRunning
 		}
+		t.trackChildItem(child, it, started, meta.TurnID)
 		for _, grandchild := range extra.children {
 			t.addChild(grandchild, it.ID)
 		}
-		if msg.Method == "item/completed" {
+		if !started {
 			t.childItemDone(child, it, extra, meta)
 			t.subagentItem(p.Item, child, meta)
 			t.emit(&agent.ItemCompleted{EventMeta: meta, Item: it})
@@ -946,6 +980,12 @@ func (t *translator) childNotify(msg *jsonrpc.Message, p turnParams, parent stri
 		_ = json.Unmarshal(msg.Params, &f)
 		t.updateTask(child, meta, func(task *agent.Task) { task.Subagent.Model = f.To })
 	case "turn/completed":
+		switch p.Turn.Status {
+		case "failed":
+			t.endChildItems(child, p.Turn.ID, agent.ItemFailed, meta)
+		case "interrupted":
+			t.endChildItems(child, p.Turn.ID, agent.ItemCancelled, meta)
+		}
 		t.updateTask(child, meta, func(task *agent.Task) {
 			delete(t.childTurns, child)
 			switch p.Turn.Status {
@@ -1004,15 +1044,113 @@ func (t *translator) stopLateChildTurn(child, turn, root string) {
 	}()
 }
 
+// trackChildItem records a child thread's item as running when started
+// and forgets it when completed. mainTurn is the main-thread turn the item
+// is reported under.
+func (t *translator) trackChildItem(thread string, it agent.Item, started bool, mainTurn string) {
+	t.s.mu.Lock()
+	defer t.s.mu.Unlock()
+	t.noteItemLocked(mainTurn, it.ID)
+	items := t.childRunning[thread]
+	idx := slices.IndexFunc(items, func(r agent.Item) bool { return r.ID == it.ID })
+	switch {
+	case started && idx >= 0:
+		items[idx] = it
+	case started:
+		t.childRunning[thread] = append(items, it)
+	case idx >= 0:
+		items = slices.Delete(items, idx, idx+1)
+		if len(items) == 0 {
+			delete(t.childRunning, thread)
+		} else {
+			t.childRunning[thread] = items
+		}
+	}
+}
+
+// endChildItems completes the items of a child thread's stopped turn that
+// Codex left running, as endRunningItems does for the main thread.
+func (t *translator) endChildItems(thread, turn string, status agent.ItemStatus, meta agent.EventMeta) {
+	var ended []agent.Item
+	t.s.mu.Lock()
+	kept := slices.DeleteFunc(t.childRunning[thread], func(it agent.Item) bool {
+		if turn != "" && it.TurnID != "" && it.TurnID != turn {
+			return false
+		}
+		if it.Tool != nil {
+			call := *it.Tool
+			call.IsError = status == agent.ItemFailed
+			it.Tool = &call
+		}
+		it.Status = status
+		ended = append(ended, it)
+		return true
+	})
+	if len(kept) == 0 {
+		delete(t.childRunning, thread)
+	} else {
+		t.childRunning[thread] = kept
+	}
+	t.s.mu.Unlock()
+	for _, it := range ended {
+		t.emit(&agent.ItemCompleted{EventMeta: meta, Item: it})
+	}
+}
+
 // addChild routes a subagent thread's messages to this session. spawn is
 // the item that started it, or "" when only the turn chain links them.
 func (t *translator) addChild(thread, spawn string) {
 	t.s.mu.Lock()
-	if old, ok := t.children[thread]; !ok || (old == "" && spawn != "") {
+	old, ok := t.children[thread]
+	if !ok {
+		t.trackChildLocked(thread)
+	}
+	if !ok || (old == "" && spawn != "") {
 		t.children[thread] = spawn
 	}
 	t.s.mu.Unlock()
 	t.s.client.registerChild(thread, t.s)
+	t.pruneChildren(thread)
+}
+
+// trackChildLocked adds a newly known child thread to childOrder. The
+// caller holds s.mu.
+func (t *translator) trackChildLocked(thread string) {
+	if _, ok := t.children[thread]; ok {
+		return
+	}
+	if _, ok := t.tasks[thread]; ok {
+		return
+	}
+	t.childOrder = append(t.childOrder, thread)
+}
+
+// pruneChildren forgets the oldest child threads that are not running
+// while more than maxChildren are known, and unregisters them from the
+// client: their later messages are held like those of any unknown thread
+// until a turn chain or an item names them again. keep is never
+// forgotten.
+func (t *translator) pruneChildren(keep string) {
+	var forgotten []string
+	t.s.mu.Lock()
+	for i := 0; len(t.childOrder) > maxChildren && i < len(t.childOrder); {
+		thread := t.childOrder[i]
+		task := t.tasks[thread]
+		if thread == keep || t.childTurns[thread] != "" || len(t.childRunning[thread]) > 0 || (task != nil && task.Status == agent.TaskRunning) {
+			i++
+			continue
+		}
+		t.childOrder = slices.Delete(t.childOrder, i, i+1)
+		delete(t.children, thread)
+		delete(t.tasks, thread)
+		delete(t.childTurns, thread)
+		delete(t.childRunning, thread)
+		forgotten = append(forgotten, thread)
+	}
+	t.s.mu.Unlock()
+	for _, thread := range forgotten {
+		t.s.client.unregisterChild(thread, t.s)
+	}
 }
 
 // newSubagentTask returns the running task of a subagent thread.
@@ -1025,6 +1163,7 @@ func (t *translator) updateTask(thread string, meta agent.EventMeta, change func
 	t.s.mu.Lock()
 	task := t.tasks[thread]
 	if task == nil {
+		t.trackChildLocked(thread)
 		task = newSubagentTask(thread)
 		task.ToolCallID = t.children[thread]
 		t.tasks[thread] = task
@@ -1033,6 +1172,9 @@ func (t *translator) updateTask(thread string, meta agent.EventMeta, change func
 	snapshot := task.Clone()
 	t.s.mu.Unlock()
 	t.emit(&agent.TaskUpdated{EventMeta: meta, Task: snapshot})
+	if snapshot.Status != agent.TaskRunning {
+		t.pruneChildren("")
+	}
 }
 
 // childItemDone records what a finished child item says about its task.
@@ -1258,6 +1400,8 @@ func itemStatus(status string) agent.ItemStatus {
 		return agent.ItemFailed
 	case "declined":
 		return agent.ItemDeclined
+	case "interrupted":
+		return agent.ItemCancelled
 	default:
 		return agent.ItemDone
 	}

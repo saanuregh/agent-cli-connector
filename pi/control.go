@@ -9,6 +9,7 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	agent "github.com/saanuregh/agent-cli-connector"
 	"github.com/saanuregh/agent-cli-connector/internal/providerutil"
@@ -169,8 +170,8 @@ func (s *Session) followSessionCwd(file string) {
 }
 
 // loadCommands reads the session's commands into Info.Commands. Commands
-// also report whether the bridge's rewind command is loaded, which
-// truncateAfter uses.
+// also report whether the bridge is loaded, which in-place rewinds and
+// gating permission modes need.
 func (s *Session) loadCommands(ctx context.Context) {
 	if cmds, err := s.Commands(ctx); err == nil {
 		s.mu.Lock()
@@ -329,8 +330,12 @@ func (s *Session) switchCommand(ctx context.Context, typ string, payload map[str
 			return "", agent.Usage{}, nil
 		}
 		if typ == "new_session" || typ == "switch_session" {
-			// The turns of the previous session no longer resolve.
+			// The turns of the previous session no longer resolve, and
+			// its grants do not carry over to another conversation.
 			s.forgetTurns()
+			s.mu.Lock()
+			clear(s.allowed)
+			s.mu.Unlock()
 		}
 		return "", agent.Usage{}, s.refreshSwitched(ctx)
 	})
@@ -650,22 +655,80 @@ type BashResult struct {
 }
 
 // Bash runs a shell command and adds its output to the conversation for the
-// next prompt, unless excludeFromContext is set. Output streams as
-// ToolOutputDelta events for the item that BashResult.ItemID names. The
-// command keeps running when ctx ends; call AbortBash to stop it.
+// next prompt, unless excludeFromContext is set. The command is a tool call
+// item, named by BashResult.ItemID, whose output streams as ToolOutputDelta
+// events and which completes when Pi answers. The command keeps running
+// when ctx ends; call AbortBash to stop it.
 func (s *Session) Bash(ctx context.Context, command string, excludeFromContext bool) (*BashResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	payload := map[string]any{"command": command}
 	if excludeFromContext {
 		payload["excludeFromContext"] = true
 	}
 	id := s.newRequestID()
-	raw, err := s.callOrdered(ctx, id, "bash", payload, nil)
-	if err != nil {
-		return nil, err
+	input, _ := json.Marshal(map[string]any{"command": command})
+	item := agent.Item{ID: "bash-" + id, Kind: agent.ItemToolCall, Status: agent.ItemRunning,
+		Tool: &agent.ToolCall{Name: "bash", Kind: agent.ToolShell, Command: command, Input: input}}
+	s.rt.Emit(&agent.ItemStarted{Item: item.Clone()})
+	var completed atomic.Bool
+	complete := func(resp rpcResponse) {
+		completed.Store(true)
+		done := item.Clone()
+		var r BashResult
+		if !resp.Success || json.Unmarshal(resp.Data, &r) != nil {
+			done.Status = agent.ItemFailed
+			done.Tool.IsError = true
+			done.Tool.Output = resp.Error
+		} else {
+			bashOutcome(&done, r.Output, r.ExitCode, r.Cancelled)
+		}
+		s.rt.Emit(&agent.ItemCompleted{EventMeta: agent.EventMeta{Raw: resp.Data}, Item: done})
 	}
-	r := BashResult{ItemID: "bash-" + id}
-	err = json.Unmarshal(raw, &r)
+	type outcome struct {
+		raw json.RawMessage
+		err error
+	}
+	// The call outlives ctx, so the item completes when Pi answers; the
+	// completion runs on the reading goroutine, after the output deltas.
+	ch := make(chan outcome, 1)
+	go func() {
+		raw, err := s.callOrdered(context.WithoutCancel(ctx), id, "bash", payload, complete)
+		if err != nil && !completed.Load() {
+			done := item.Clone()
+			done.Status = agent.ItemFailed
+			done.Tool.IsError = true
+			done.Tool.Output = err.Error()
+			s.rt.Emit(&agent.ItemCompleted{Item: done})
+		}
+		ch <- outcome{raw, err}
+	}()
+	var o outcome
+	select {
+	case o = <-ch:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if o.err != nil {
+		return nil, o.err
+	}
+	r := BashResult{ItemID: item.ID}
+	err := json.Unmarshal(o.raw, &r)
 	return &r, err
+}
+
+// bashOutcome fills a shell item from a bash command's result: a cancelled
+// command is cancelled, and a nonzero exit code is an error.
+func bashOutcome(item *agent.Item, output string, exitCode *int, cancelled bool) {
+	item.Tool.Output = output
+	item.Tool.ExitCode = exitCode
+	item.Status = agent.ItemDone
+	if cancelled {
+		item.Status = agent.ItemCancelled
+	} else if exitCode != nil && *exitCode != 0 {
+		item.Tool.IsError = true
+	}
 }
 
 // AbortBash stops a running Bash command.
@@ -755,14 +818,17 @@ func (s *Session) Commands(ctx context.Context) ([]agent.SlashCommand, error) {
 		return nil, err
 	}
 	out := make([]agent.SlashCommand, 0, len(data.Commands)+len(builtinCommands))
+	bridge := false
 	for _, c := range data.Commands {
 		if c.Name == rewindCommand && c.Source == "extension" {
-			s.rewindReady.Store(true)
+			bridge = true
 			continue
 		}
 		out = append(out, agent.SlashCommand{Name: c.Name, Description: c.Description, Kind: c.Source,
 			Path: c.SourceInfo.Path, Scope: commandScope(c.SourceInfo.Scope)})
 	}
+	// Pi loads extensions again for every session it switches to.
+	s.bridgeLoaded.Store(bridge)
 	for _, b := range builtinCommands {
 		if !slices.ContainsFunc(out, func(c agent.SlashCommand) bool { return c.Name == b.Name }) {
 			out = append(out, b)

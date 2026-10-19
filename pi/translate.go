@@ -3,6 +3,7 @@ package pi
 import (
 	"bytes"
 	"cmp"
+	"encoding/base64"
 	"encoding/json"
 	"maps"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	agent "github.com/saanuregh/agent-cli-connector"
+	"github.com/saanuregh/agent-cli-connector/internal/providerutil"
 )
 
 // translator turns Pi session events into uniform events. It runs on the
@@ -19,6 +21,9 @@ import (
 type translator struct {
 	s *Session
 
+	// idPrefix makes the item IDs of assistant messages unique to this
+	// translator, since Pi gives a message no ID until it ended.
+	idPrefix string
 	messages int
 	msgKey   string
 	blocks   map[int]string
@@ -34,6 +39,9 @@ type translator struct {
 	summaryAttempt int
 	// pendingUsers wait for the bridge to report their session entry IDs.
 	pendingUsers []pendingUser
+	// subtasks holds the running subagent tasks of each tool call, to
+	// close them if the call ends without reporting them finished.
+	subtasks map[string]map[string]agent.Task
 }
 
 // runState is the state of one run, cleared when the run settles.
@@ -60,10 +68,12 @@ type pendingUser struct {
 
 func newTranslator(s *Session) *translator {
 	return &translator{
-		s:       s,
-		blocks:  make(map[int]string),
-		tools:   make(map[string]*agent.Item),
-		partial: make(map[string]partialOutput),
+		s:        s,
+		idPrefix: "msg-" + providerutil.NewUUID()[:8] + "-",
+		subtasks: make(map[string]map[string]agent.Task),
+		blocks:   make(map[int]string),
+		tools:    make(map[string]*agent.Item),
+		partial:  make(map[string]partialOutput),
 	}
 }
 
@@ -141,6 +151,14 @@ func (m piMessage) blocks() []piBlock {
 		return []piBlock{{Type: "text", Text: text}}
 	}
 	return nil
+}
+
+// rawBlocks returns the native bytes of each content block, in the order
+// of blocks, when the content is a list.
+func (m piMessage) rawBlocks() []json.RawMessage {
+	var raws []json.RawMessage
+	_ = json.Unmarshal(m.Content, &raws)
+	return raws
 }
 
 func (m piMessage) text() string {
@@ -231,7 +249,7 @@ func (t *translator) handle(typ string, line []byte) {
 	case "message_start":
 		if ev.message().Role == "assistant" {
 			t.messages++
-			t.msgKey = "msg-" + strconv.Itoa(t.messages) + "-" + t.s.ID()
+			t.msgKey = t.idPrefix + strconv.Itoa(t.messages)
 			clear(t.blocks)
 		}
 	case "message_end":
@@ -266,6 +284,13 @@ func (t *translator) handle(typ string, line []byte) {
 		if ev.ToolName == "subagent" {
 			t.subagentToolTasks(ev.ToolCallID, ev.Result, args, true, meta)
 		}
+		// Tasks the result did not report finished, as when the tool
+		// failed or was aborted, end with it.
+		status, errText := agent.TaskStopped, ""
+		if ev.IsError {
+			status, errText = agent.TaskFailed, cmp.Or(resultText(ev.Result), "the subagent tool failed")
+		}
+		t.closeSubtasks(ev.ToolCallID, status, errText, meta)
 		if ev.ToolName == outputTool && !ev.IsError {
 			var r struct {
 				Details json.RawMessage `json:"details"`
@@ -716,19 +741,32 @@ func fillToolDetails(call *agent.ToolCall, args json.RawMessage) {
 }
 
 func resultText(raw json.RawMessage) string {
+	text, _ := resultContent(raw)
+	return text
+}
+
+// resultContent returns the text and images of a tool result, or of a
+// toolResult message, which has the same content field.
+func resultContent(raw json.RawMessage) (string, []agent.Image) {
 	var r struct {
 		Content []piBlock `json:"content"`
 	}
 	if json.Unmarshal(raw, &r) != nil {
-		return ""
+		return "", nil
 	}
 	var parts []string
+	var images []agent.Image
 	for _, b := range r.Content {
-		if b.Type == "text" {
+		switch b.Type {
+		case "text":
 			parts = append(parts, b.Text)
+		case "image":
+			if data, err := base64.StdEncoding.DecodeString(b.Data); err == nil {
+				images = append(images, agent.Image{MediaType: b.MimeType, Data: data})
+			}
 		}
 	}
-	return strings.Join(parts, "")
+	return strings.Join(parts, ""), images
 }
 
 func (t *translator) toolEnd(ev piEvent, meta agent.EventMeta) {
@@ -738,7 +776,7 @@ func (t *translator) toolEnd(ev piEvent, meta agent.EventMeta) {
 	}
 	delete(t.tools, ev.ToolCallID)
 	delete(t.partial, ev.ToolCallID)
-	item.Tool.Output = resultText(ev.Result)
+	item.Tool.Output, item.Tool.Images = resultContent(ev.Result)
 	item.Tool.IsError = ev.IsError
 	if ev.DurationMS != nil {
 		item.Tool.Duration = time.Duration(*ev.DurationMS) * time.Millisecond
@@ -806,6 +844,7 @@ func (t *translator) messageEnd(m piMessage, meta agent.EventMeta) {
 			status = agent.ItemCancelled
 		}
 		var texts []string
+		raws := m.rawBlocks()
 		for i, b := range m.blocks() {
 			switch b.Type {
 			case "text", "thinking":
@@ -822,7 +861,10 @@ func (t *translator) messageEnd(m piMessage, meta agent.EventMeta) {
 					id = t.msgKey + "/" + strconv.Itoa(i)
 					t.emit(&agent.ItemStarted{EventMeta: meta, Item: agent.Item{ID: id, Kind: kind, Status: agent.ItemRunning}})
 				}
-				raw, _ := json.Marshal(b)
+				var raw json.RawMessage
+				if i < len(raws) {
+					raw = raws[i]
+				}
 				t.emit(&agent.ItemCompleted{EventMeta: meta, Item: agent.Item{ID: id, Kind: kind, Status: status, Text: text, Raw: raw}})
 			case "toolCall":
 				item := t.toolItem(b.ID, b.Name, "", meta)
@@ -897,17 +939,6 @@ func (t *translator) messageEnd(m piMessage, meta agent.EventMeta) {
 		}
 		id := "custom-" + strconv.FormatInt(m.Timestamp, 10)
 		t.emit(&agent.ItemCompleted{EventMeta: meta, Item: agent.Item{ID: id, Kind: agent.ItemOther, Status: agent.ItemDone, Text: m.text(), Raw: meta.Raw}})
-	case "bashExecution":
-		id := "bash-" + strconv.FormatInt(m.Timestamp, 10)
-		data, _ := json.Marshal(map[string]any{"command": m.Command})
-		call := &agent.ToolCall{Name: "bash", Kind: agent.ToolShell, Command: m.Command, Output: m.Output, ExitCode: m.ExitCode, Input: data}
-		status := agent.ItemDone
-		if m.Cancelled {
-			status = agent.ItemCancelled
-		} else if m.ExitCode != nil && *m.ExitCode != 0 {
-			call.IsError = true
-		}
-		t.emit(&agent.ItemCompleted{EventMeta: meta, Item: agent.Item{ID: id, Kind: agent.ItemToolCall, Status: status, Tool: call, Raw: meta.Raw}})
 	case "compactionSummary", "branchSummary":
 		id := m.Role + "-" + strconv.FormatInt(m.Timestamp, 10)
 		t.emit(&agent.ItemCompleted{EventMeta: meta, Item: agent.Item{ID: id, Kind: agent.ItemCompaction, Status: agent.ItemDone, Text: m.Summary, Raw: meta.Raw}})
@@ -1005,6 +1036,9 @@ func (t *translator) settled(aborted bool, line []byte) {
 		delete(t.tools, id)
 		delete(t.partial, id)
 	}
+	for id := range t.subtasks {
+		t.closeSubtasks(id, agent.TaskStopped, "", agent.EventMeta{Raw: line})
+	}
 
 	s := t.s
 	switch {
@@ -1062,6 +1096,29 @@ func (t *translator) subagentToolTasks(callID string, result, args json.RawMessa
 		t.s.mu.Unlock()
 	}
 	for _, task := range tasks {
+		running := t.subtasks[callID]
+		if task.Status == agent.TaskRunning {
+			if running == nil {
+				running = map[string]agent.Task{}
+				t.subtasks[callID] = running
+			}
+			running[task.ID] = task
+		} else {
+			delete(running, task.ID)
+		}
+		t.emit(&agent.TaskUpdated{EventMeta: meta, Task: task})
+	}
+}
+
+// closeSubtasks ends the subagent tasks of tool call callID that are
+// still running with status.
+func (t *translator) closeSubtasks(callID string, status agent.TaskStatus, errText string, meta agent.EventMeta) {
+	running := t.subtasks[callID]
+	delete(t.subtasks, callID)
+	for _, id := range slices.Sorted(maps.Keys(running)) {
+		task := running[id]
+		task.Status = status
+		task.Error = errText
 		t.emit(&agent.TaskUpdated{EventMeta: meta, Task: task})
 	}
 }

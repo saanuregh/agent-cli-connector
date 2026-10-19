@@ -120,7 +120,7 @@ func TestSubagentWriteFailureKeepsParentChange(t *testing.T) {
 	if err := sess.SetPermissionMode(context.Background(), agent.PermissionReadOnly); err != nil {
 		t.Fatal(err)
 	}
-	if rules := l.get("ses_child"); !slices.Contains(rules, "edit:*=deny") {
+	if rules := l.get("ses_child"); !slices.Contains(rules, "*:*=deny") {
 		t.Fatalf("subagent rules = %v", rules)
 	}
 }
@@ -194,10 +194,10 @@ func TestSubagentStartsFromReportedRules(t *testing.T) {
 	// Copied from an older parent state.
 	f.emit("session.created", map[string]any{"sessionID": "ses_child", "parentID": fakeSession, "agent": "build",
 		"permissions": []any{map[string]any{"action": "*", "resource": "*", "effect": "allow"}}})
-	l.waitRules(t, "ses_child", func(r []string) bool { return slices.Contains(r, "edit:*=deny") })
+	l.waitRules(t, "ses_child", func(r []string) bool { return slices.Contains(r, "*:*=deny") })
 	f.emit("session.created", map[string]any{"sessionID": "ses_grandchild", "parentID": "ses_child", "agent": "general",
 		"permissions": []any{map[string]any{"action": "*", "resource": "*", "effect": "allow"}}})
-	l.waitRules(t, "ses_grandchild", func(r []string) bool { return slices.Contains(r, "edit:*=deny") })
+	l.waitRules(t, "ses_grandchild", func(r []string) bool { return slices.Contains(r, "*:*=deny") })
 }
 
 // A subagent session resumed with another agent gets that agent's rules,

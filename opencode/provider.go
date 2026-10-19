@@ -332,17 +332,31 @@ func summary(n nativeSession, raw json.RawMessage) agent.SessionSummary {
 // ReadHistory reads a persisted session's transcript. Items carry the ID
 // of the user message that started their turn as TurnID, which Rewind and
 // ForkAtTurn accept. With opts.SubagentID, a subagent task ID, it reads
-// that subagent's session.
+// that subagent's session; its items carry the IDs, SubagentID, and
+// ParentID a live session gives them, ParentID when the parent's history
+// still names the tool call that ran it.
+//
+// Item IDs match a live session's, including compactions, which take the
+// ID of their message. What differs: history has items where a live
+// session sends only raw events, for shell commands, system notices,
+// skills, and a subagent's prompt; and items a turn left running keep
+// ItemRunning, where a live session cancels them when the turn ends.
 func (p *Provider) ReadHistory(ctx context.Context, sessionID string, opts agent.ReadHistoryOptions) ([]agent.Item, error) {
-	sid := sessionID
+	sid, toolPrefix := sessionID, ""
 	if opts.SubagentID != "" {
-		sid = opts.SubagentID
+		sid, toolPrefix = opts.SubagentID, opts.SubagentID+"/"
 	}
 	var items []agent.Item
 	err := p.withClient(ctx, func(c *Client) error {
 		var err error
-		items, err = readHistory(ctx, c, sid, opts.Limit, opts.Offset)
-		return err
+		if items, err = readHistory(ctx, c, sid, toolPrefix, opts.Limit, opts.Offset); err != nil || opts.SubagentID == "" {
+			return err
+		}
+		parent := subagentToolItem(ctx, c, sessionID, opts.SubagentID)
+		for i := range items {
+			items[i].SubagentID, items[i].ParentID = opts.SubagentID, parent
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("opencode: read history of %s: %w", sid, err)

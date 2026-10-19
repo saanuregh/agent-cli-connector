@@ -51,6 +51,46 @@ func TestRequestAnswerOnce(t *testing.T) {
 	}
 }
 
+func TestPermissionRespondRefusesDecisionNotOffered(t *testing.T) {
+	var sent []agent.PermissionDecision
+	newRequest := func() *agent.PermissionRequest {
+		return providerkit.NewPermissionRequest(agent.PermissionRequest{
+			ID:        "r",
+			Decisions: []agent.PermissionDecision{agent.DecisionAllow},
+		}, func(_ context.Context, resp agent.PermissionResponse) error {
+			sent = append(sent, resp.Decision)
+			return nil
+		})
+	}
+	req := newRequest()
+	for _, d := range []agent.PermissionDecision{agent.DecisionAllowSession, agent.DecisionAllowAlways} {
+		if err := req.Respond(context.Background(), agent.PermissionResponse{Decision: d}); !errors.Is(err, agent.ErrInvalidAnswer) {
+			t.Errorf("%s = %v, want ErrInvalidAnswer", d, err)
+		}
+	}
+	if req.Outcome() != agent.RequestPending {
+		t.Errorf("outcome after refused answers = %q", req.Outcome())
+	}
+	if err := req.Allow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Refusing stays possible even when the harness did not list it.
+	if err := newRequest().Deny(context.Background(), "no"); err != nil {
+		t.Errorf("deny = %v", err)
+	}
+	if err := newRequest().Cancel(context.Background()); err != nil {
+		t.Errorf("cancel = %v", err)
+	}
+	// A native answer bypasses the uniform decision check.
+	if err := newRequest().Respond(context.Background(), agent.PermissionResponse{Decision: agent.DecisionAllowAlways, ProviderResponse: "native"}); err != nil {
+		t.Errorf("provider response = %v", err)
+	}
+	want := []agent.PermissionDecision{agent.DecisionAllow, agent.DecisionDeny, agent.DecisionCancel, agent.DecisionAllowAlways}
+	if !slices.Equal(sent, want) {
+		t.Errorf("sent %v, want %v", sent, want)
+	}
+}
+
 func TestWithdrawnRequestRejectsAnswers(t *testing.T) {
 	req := providerkit.NewElicitationRequest(agent.ElicitationRequest{ID: "e"}, func(context.Context, agent.ElicitationResponse) error { return nil })
 	providerkit.WithdrawRequest(req)

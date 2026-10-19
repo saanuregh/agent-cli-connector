@@ -19,10 +19,10 @@ import (
 
 // Permission rules
 //
-// How OpenCode 2.0.32 decides. A request names an action and one or more
-// resources. OpenCode lists the agent's rules (GET /api/agent, which
-// includes the config's "permissions"; an agent it does not list has
-// unknownAgentRules), then the session's rules. For each resource the
+// How OpenCode decides, as of the version REFERENCES.md names. A request
+// names an action and one or more resources. OpenCode lists the agent's
+// rules (GET /api/agent, which includes the config's "permissions"; an
+// agent it does not list has unknownAgentRules), then the session's rules. For each resource the
 // last rule whose action and resource globs match decides; no match means
 // ask. The request is denied when any resource is denied. Otherwise the
 // project's saved "always" approvals are added after the session's rules,
@@ -51,7 +51,8 @@ import (
 //     asks of host tools with NeedsApproval.
 //  5. Mode denies: plan denies edits, except, for the plan agent, its own
 //     plan paths that no later rule of the agent denies; readOnly denies
-//     edits.
+//     every action but those it keeps (readOnlyActions), which keep the
+//     answer the layers above gave them.
 //  6. DisallowedTools: denies.
 //  7. SessionOptions.Permissions: the caller's last word.
 //
@@ -61,8 +62,10 @@ import (
 // ApprovedTools, among its own servers and those the directory configures.
 //
 // Layers 3 to 7 outrank agent denies: 3, 4, 6, and 7 are the caller's
-// explicit settings, and 5 only adds denies and the plan agent's own
-// allows.
+// explicit settings, and 5 only adds denies, the plan agent's own allows,
+// and readOnly's copies of earlier rules. So readOnly also denies the
+// AllowedTools and MCP tools it does not keep; Permissions can still
+// allow them.
 //
 // AllowSession grants. A grant answers one ask, for one resource. Each
 // time the rules are built, it is placed against the rule that asks for
@@ -234,7 +237,7 @@ func (s *Session) buildRules(mode agent.PermissionMode, agentName string, grants
 			rules = append(rules, planPathRules(agentRules)...)
 		}
 	case agent.PermissionReadOnly:
-		rules = append(rules, rule("edit", "deny"))
+		rules = readOnlyRules(agentRules, rules, s.readOnlyActions())
 	}
 	// 6. Disallowed tools.
 	for _, name := range s.cfg.DisallowedTools {
@@ -249,6 +252,54 @@ func (s *Session) buildRules(mode agent.PermissionMode, agentName string, grants
 	rules = dedupeRules(rules)
 	if len(rules) == 0 {
 		return nil
+	}
+	return rules
+}
+
+// readOnlyActions are the actions readOnly keeps: the built-in tools that
+// change nothing, shell and external_directory, which keep asking as in
+// acceptEdits, doom_loop, OpenCode's ask about repeated calls, and this
+// session's host tools marked ReadOnly. subagent is kept because its
+// session gets readOnly rules too. Everything else is denied, including
+// edits, webfetch and websearch, MCP and plugin tools, and "execute",
+// which runs the tools OpenCode offers in code mode.
+func (s *Session) readOnlyActions() []string {
+	actions := []string{"read", "glob", "grep", "skill", "question", "subagent", "doom_loop", "shell", "external_directory"}
+	if s.host != nil {
+		for _, t := range s.cfg.Tools {
+			if t.ReadOnly {
+				actions = append(actions, toolAction(s.host.name, t.Name))
+			}
+		}
+	}
+	return actions
+}
+
+// readOnlyRules returns rules followed by a deny of everything and then,
+// for each kept action, OpenCode's no-match ask and every rule so far,
+// among the agent's rules and rules, narrowed to that action. A kept
+// action thus gets the answer it had before, and every other action is
+// denied.
+func readOnlyRules(agentRules, rules []PermissionRule, kept []string) []PermissionRule {
+	all := append(slices.Clone(agentRules), rules...)
+	rules = append(rules, rule("*", "deny"))
+	for _, action := range kept {
+		// The last rule for every resource of the action overrides those
+		// before it.
+		from := -1
+		for i, r := range all {
+			if r.Resource == "*" && globMatch(r.Action, action) {
+				from = i
+			}
+		}
+		if from < 0 {
+			rules = append(rules, rule(action, "ask"))
+		}
+		for _, r := range all[max(from, 0):] {
+			if globMatch(r.Action, action) {
+				rules = append(rules, PermissionRule{Action: action, Resource: r.Resource, Effect: r.Effect})
+			}
+		}
 	}
 	return rules
 }

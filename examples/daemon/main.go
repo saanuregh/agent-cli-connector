@@ -5,35 +5,47 @@
 //
 //	go run ./examples/daemon -addr 127.0.0.1:8080
 //
+//	# it prints a token at startup; every request must carry it
+//	TOKEN=...
+//	AUTH="Authorization: Bearer $TOKEN" JSON="Content-Type: application/json"
 //	# start a session; the reply carries its id
-//	curl -s localhost:8080/sessions -d '{"provider":"claude","cwd":"/tmp"}'
+//	curl -s -H "$AUTH" -H "$JSON" localhost:8080/sessions -d '{"provider":"claude","cwd":"/tmp"}'
 //	# follow its events (Server-Sent Events; reconnects resume with Last-Event-ID)
-//	curl -N localhost:8080/sessions/$ID/events
+//	curl -N -H "$AUTH" localhost:8080/sessions/$ID/events
 //	# send a message; "wait":true returns the turn's result instead
-//	curl -s localhost:8080/sessions/$ID/messages -d '{"text":"List the files here"}'
+//	curl -s -H "$AUTH" -H "$JSON" localhost:8080/sessions/$ID/messages -d '{"text":"List the files here"}'
 //	# answer a permission, question, or elicitation the agent is waiting on
-//	curl -s localhost:8080/sessions/$ID/requests
-//	curl -s localhost:8080/sessions/$ID/requests/$RID -d '{"decision":"allow"}'
+//	curl -s -H "$AUTH" localhost:8080/sessions/$ID/requests
+//	curl -s -H "$AUTH" -H "$JSON" localhost:8080/sessions/$ID/requests/$RID -d '{"decision":"allow"}'
 //	# end it
-//	curl -s -X DELETE localhost:8080/sessions/$ID
+//	curl -s -H "$AUTH" -X DELETE localhost:8080/sessions/$ID
 //
-// The API has no authentication and runs agents with your credentials, so
-// it listens on loopback by default. Do not expose it.
+// The API runs agents with your credentials, and a session can run any
+// command as you. Listening on loopback does not keep out other users of
+// this machine or web pages in your browser, so every request needs the
+// random bearer token printed at startup. Requests that name a host other
+// than the listen address or loopback, such as after DNS rebinding, and
+// requests from browsers, which carry an Origin header, are refused, and
+// request bodies must be JSON. Do not expose it beyond this machine.
 package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"maps"
+	"mime"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,13 +66,23 @@ func main() {
 	root, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// The bound address, so a port of 0 resolves to the real one.
+	host, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		log.Fatal(err)
+	}
 	d := &daemon{
 		registry: agent.NewRegistry(claude.New(claude.Options{}), codex.New(codex.Options{}), pi.New(pi.Options{}), opencode.New(opencode.Options{})),
 		sessions: map[string]*hosted{},
 		keep:     *keep,
+		token:    rand.Text(),
+		hosts:    allowedHosts(host, port),
 	}
 	srv := &http.Server{
-		Addr:        *addr,
 		Handler:     d.routes(),
 		BaseContext: func(net.Listener) context.Context { return root },
 	}
@@ -70,8 +92,9 @@ func main() {
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
 	}()
-	log.Printf("listening on http://%s", *addr)
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	log.Printf("listening on http://%s", net.JoinHostPort(host, port))
+	log.Printf("token: %s", d.token)
+	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 	d.closeAll()
@@ -80,6 +103,8 @@ func main() {
 type daemon struct {
 	registry *agent.Registry
 	keep     int
+	token    string
+	hosts    map[string]bool // Host header values accepted
 
 	mu       sync.Mutex
 	sessions map[string]*hosted
@@ -97,7 +122,55 @@ func (d *daemon) routes() http.Handler {
 	mux.HandleFunc("GET /sessions/{id}/events", d.withSession(d.events))
 	mux.HandleFunc("GET /sessions/{id}/requests", d.withSession(d.requests))
 	mux.HandleFunc("POST /sessions/{id}/requests/{rid}", d.withSession(d.answer))
-	return mux
+	return d.guard(mux)
+}
+
+// allowedHosts returns the Host header values a request may carry: the
+// loopback names and, when the daemon listens on one address, that address.
+// A domain name is refused because DNS rebinding lets any web page point
+// one at this machine.
+func allowedHosts(host, port string) map[string]bool {
+	hosts := map[string]bool{}
+	for _, h := range []string{"127.0.0.1", "::1", "localhost"} {
+		hosts[net.JoinHostPort(h, port)] = true
+	}
+	if ip := net.ParseIP(host); ip != nil && !ip.IsUnspecified() {
+		hosts[net.JoinHostPort(host, port)] = true
+	}
+	return hosts
+}
+
+// guard refuses requests that could come from anyone but the token holder:
+// other local users, which loopback does not stop, and web pages, which can
+// reach loopback through the browser.
+func (d *daemon) guard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !d.hosts[r.Host] {
+			reply(w, http.StatusForbidden, map[string]string{"error": "host not allowed"})
+			return
+		}
+		// Browsers send Origin on cross-origin and most same-origin
+		// requests; command-line clients do not.
+		if r.Header.Get("Origin") != "" {
+			reply(w, http.StatusForbidden, map[string]string{"error": "browser requests are not allowed"})
+			return
+		}
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || subtle.ConstantTimeCompare([]byte(token), []byte(d.token)) != 1 {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			reply(w, http.StatusUnauthorized, map[string]string{"error": "missing or wrong bearer token"})
+			return
+		}
+		// A form or text/plain POST needs no CORS preflight, so only JSON
+		// bodies are read.
+		if r.Method == http.MethodPost && r.ContentLength != 0 {
+			if media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || media != "application/json" {
+				reply(w, http.StatusUnsupportedMediaType, map[string]string{"error": "body must be application/json"})
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // providers reports each harness's install and sign-in status.

@@ -1,20 +1,6 @@
 package claude
 
-import (
-	"testing"
-
-	"github.com/saanuregh/agent-cli-connector/internal/providerutil"
-)
-
-func TestUUID(t *testing.T) {
-	id := providerutil.NewUUID()
-	if !isUUID(id) || id[14] != '4' {
-		t.Errorf("uuid %q", id)
-	}
-	if isUUID("not-a-uuid") {
-		t.Error("accepted invalid uuid")
-	}
-}
+import "testing"
 
 func TestHistoryItemID(t *testing.T) {
 	ids := map[string]bool{}

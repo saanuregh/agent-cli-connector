@@ -213,19 +213,20 @@ func TestPermissionModeMapping(t *testing.T) {
 			t.Errorf("readOnly settings = %v", upd)
 		}
 		h.Reply(upd, map[string]any{})
+		// Plan mode promises no changes, so it keeps the read-only sandbox.
+		upd = h.RecvWhere(fakeproc.Method("thread/settings/update"))
+		if fakeproc.Str(upd, "params", "collaborationMode", "mode") != "plan" || fakeproc.Str(upd, "params", "collaborationMode", "settings", "model") != "gpt-test" ||
+			fakeproc.Get(upd, "params", "collaborationMode", "settings", "developer_instructions") != nil ||
+			fakeproc.Str(upd, "params", "sandboxPolicy", "type") != "readOnly" || fakeproc.Str(upd, "params", "approvalPolicy") != "on-request" {
+			t.Errorf("plan settings = %v", upd)
+		}
+		h.Reply(upd, map[string]any{})
 		// Workspace-write without a known policy reads the configured one.
 		cfg := h.RecvWhere(fakeproc.Method("config/read"))
 		if fakeproc.Str(cfg, "params", "cwd") != "/w" {
 			t.Errorf("config/read = %v", cfg)
 		}
 		h.Reply(cfg, map[string]any{"config": map[string]any{"sandbox_workspace_write": map[string]any{"writable_roots": []any{"/extra"}, "network_access": true}}, "origins": map[string]any{}})
-		upd = h.RecvWhere(fakeproc.Method("thread/settings/update"))
-		if fakeproc.Str(upd, "params", "collaborationMode", "mode") != "plan" || fakeproc.Str(upd, "params", "collaborationMode", "settings", "model") != "gpt-test" ||
-			fakeproc.Get(upd, "params", "collaborationMode", "settings", "developer_instructions") != nil ||
-			fakeproc.Str(upd, "params", "sandboxPolicy", "writableRoots", 0) != "/extra" || fakeproc.Get(upd, "params", "sandboxPolicy", "networkAccess") != true {
-			t.Errorf("plan settings = %v", upd)
-		}
-		h.Reply(upd, map[string]any{})
 		upd = h.RecvWhere(fakeproc.Method("thread/settings/update"))
 		if fakeproc.Str(upd, "params", "collaborationMode", "mode") != "default" || fakeproc.Str(upd, "params", "sandboxPolicy", "writableRoots", 0) != "/extra" {
 			t.Errorf("leaving plan settings = %v", upd)

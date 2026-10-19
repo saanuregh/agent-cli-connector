@@ -116,7 +116,8 @@ func parentCalls(g *transcriptGraph) parentLinks {
 				if !ok {
 					continue
 				}
-				c.done, c.failed, c.output = true, b.IsError, textOf(b.Content)
+				c.done, c.failed = true, b.IsError
+				c.output, _ = toolResultContent(b.Content)
 				if m := workflowRunID.FindStringSubmatch(c.output); m != nil {
 					links.byRun[m[1]] = b.ToolUseID
 				}
@@ -161,9 +162,10 @@ func subagentTask(file, id string, links parentLinks) agent.Task {
 
 // readSubagentRun fills in what a subagent's own transcript tells: its
 // prompt, model, effort, final answer, and the context size of its last
-// request.
+// request. The final answer is the report of its last SubagentHandback
+// call, as in the live stream, else its last text.
 func readSubagentRun(file string, task *agent.Task) {
-	var last string
+	var last, handback string
 	var lastStop string
 	err := eachTranscriptEntry(file, isNotAPIRequestLine, func(e transcriptEntry) error {
 		var m struct {
@@ -176,7 +178,7 @@ func readSubagentRun(file string, task *agent.Task) {
 		switch e.Type {
 		case "user":
 			if task.Subagent.Prompt == "" && !e.IsMeta {
-				task.Subagent.Prompt = textOf(m.Content)
+				task.Subagent.Prompt, _ = toolResultContent(m.Content)
 			}
 		case "assistant":
 			if m.Model != "" && m.Model != "<synthetic>" {
@@ -188,7 +190,20 @@ func readSubagentRun(file string, task *agent.Task) {
 			if m.Usage != nil && m.Usage.total() > 0 {
 				task.Usage = &agent.Usage{TotalTokens: m.Usage.total()}
 			}
-			if t := textOf(m.Content); t != "" {
+			var blocks []contentBlock
+			if json.Unmarshal(m.Content, &blocks) == nil {
+				for _, b := range blocks {
+					if b.Type == "tool_use" && b.Name == handbackTool {
+						var in struct {
+							Message string `json:"message"`
+						}
+						if json.Unmarshal(b.Input, &in) == nil && strings.TrimSpace(in.Message) != "" {
+							handback = in.Message
+						}
+					}
+				}
+			}
+			if t, _ := toolResultContent(m.Content); t != "" {
 				last = t
 			}
 			lastStop = m.StopReason
@@ -198,7 +213,7 @@ func readSubagentRun(file string, task *agent.Task) {
 	if err != nil {
 		return
 	}
-	task.Output = last
+	task.Output = cmp.Or(handback, last)
 	if task.Status == agent.TaskRunning && lastStop == "end_turn" {
 		task.Status = agent.TaskCompleted
 	}

@@ -24,7 +24,8 @@
 //     workspace-write, readOnly → on-request + read-only, dontAsk → never +
 //     workspace-write, bypassPermissions → never + danger-full-access,
 //     auto → on-request with the auto reviewer, plan → plan collaboration
-//     mode. Any other mode is sent as the native approval policy, such as
+//     mode + on-request + read-only, so planning changes nothing. Any
+//     other mode is sent as the native approval policy, such as
 //     "untrusted", and Codex refuses ones it does not know.
 //   - Tools are served as dynamic tools.
 //   - AllowedTools has no Codex equivalent and is ignored: it is listed in a
@@ -36,7 +37,10 @@
 //     tools.<name>.approval_mode = "approve" in the server's mcp_servers
 //     table; AlwaysLoad has no Codex equivalent and is ignored.
 //   - Env and UnsetEnv apply to a dedicated app-server only; a shared
-//     server uses Options.Env and Options.UnsetEnv.
+//     server uses Options.Env and Options.UnsetEnv. On a shared server Env
+//     is ignored like AllowedTools, and UnsetEnv is refused, because it
+//     is a restriction (such as stripping secrets) the session cannot
+//     apply.
 //   - OutputSchema applies to every turn without Input.OutputSchema. Both
 //     are normalized to OpenAI strict form; see StrictOutputSchema and
 //     SessionOptions.DisableStrictOutputSchema. A steer joins the running

@@ -273,7 +273,7 @@ func (s *Session) buildArgs(cfg agent.Config, o SessionOptions, sessionID string
 	if o.BuiltinTools != nil {
 		args = append(args, flag("tools", strings.Join(o.BuiltinTools, ",")))
 	}
-	if servers := mcpConfig(cfg.MCPServers); len(servers) > 0 && !o.MCPViaControl {
+	if servers := mcpConfig(cfg.MCPServers); len(servers) > 0 && !mcpViaControl(cfg, o) {
 		data, err := json.Marshal(map[string]any{"mcpServers": servers})
 		if err != nil {
 			return nil, fmt.Errorf("claude: encode MCP config: %w", err)
@@ -453,6 +453,23 @@ func mcpConfig(servers map[string]agent.MCPServer) map[string]any {
 		out[name] = entry
 	}
 	return out
+}
+
+// mcpViaControl reports whether cfg.MCPServers are registered with the
+// mcp_set_servers control request instead of the --mcp-config flag: when
+// SessionOptions.MCPViaControl asks for it, and whenever a server has
+// headers or environment variables, which other local users could read
+// from the command line.
+func mcpViaControl(cfg agent.Config, o SessionOptions) bool {
+	if o.MCPViaControl {
+		return true
+	}
+	for _, srv := range cfg.MCPServers {
+		if (srv.Enabled == nil || *srv.Enabled) && (len(srv.Headers) > 0 || len(srv.Env) > 0) {
+			return true
+		}
+	}
+	return false
 }
 
 // bypassAllowed reports whether the CLI is launched so that it accepts

@@ -241,20 +241,22 @@ func summarize(path string) (agent.SessionSummary, bool) {
 	if !hasMessages {
 		return sum, false
 	}
-	if len(firstPrompt) > 200 {
-		firstPrompt = firstPrompt[:200]
-	}
+	firstPrompt = cutAtRune(firstPrompt, 200)
 	sum.Title = cmp.Or(customTitle, aiTitle, firstPrompt)
 	return sum, true
 }
 
 // preview collapses whitespace and cuts text to previewLimit bytes.
 func preview(text string) string {
-	text = strings.Join(strings.Fields(text), " ")
-	if len(text) <= previewLimit {
+	return cutAtRune(strings.Join(strings.Fields(text), " "), previewLimit)
+}
+
+// cutAtRune cuts text to at most limit bytes without splitting a rune.
+func cutAtRune(text string, limit int) string {
+	if len(text) <= limit {
 		return text
 	}
-	cut := previewLimit
+	cut := limit
 	for cut > 0 && !utf8.RuneStart(text[cut]) {
 		cut--
 	}
@@ -388,8 +390,16 @@ func normalizeCommand(text string) string {
 // a checklist and whose Raw is the []agent.PlanStep JSON. Items carry the
 // entry's Time and, as TurnID, the UUID of the prompt that started their
 // turn. Slash-command wrappers read "/name args", and background-task
-// notification prompts are Synthetic. With opts.SubagentID it reads that
-// subagent's transcript from the session's subagents directory instead.
+// notification prompts are Synthetic. A tool call without a result reads
+// as cancelled once a later turn started. With opts.SubagentID it reads
+// that subagent's transcript from the session's subagents directory
+// instead.
+//
+// Tool call items have the IDs the live stream gives them (the tool_use
+// ID). Message and reasoning items are named after their transcript entry
+// UUID, unlike live items, which are named after the API message ID and
+// block index because a streamed block starts before its entry UUID is
+// known.
 func (p *Provider) ReadHistory(ctx context.Context, sessionID string, opts agent.ReadHistoryOptions) ([]agent.Item, error) {
 	path, err := findTranscript(p.configDir(agent.Config{}), sessionID, opts.Cwd)
 	if err != nil {
@@ -438,6 +448,7 @@ func (p *Provider) ReadHistory(ctx context.Context, sessionID string, opts agent
 		}
 		h.add(e)
 	}
+	h.endOrphanedCalls()
 	return providerutil.LastPage(h.items, opts.Limit, opts.Offset), nil
 }
 
@@ -567,10 +578,8 @@ func (h *historyBuilder) add(e transcriptEntry) {
 				}
 				continue
 			}
-			call := &agent.ToolCall{Name: b.Name, Kind: agent.ToolKind(toolKind(b.Name, "")), Input: b.Input}
-			if call.Kind == agent.ToolMCP {
-				call.Server = mcpServerOf(b.Name)
-			}
+			call := toolCallOf(b, "")
+			call.Input = b.Input
 			fillToolDetails(call, b.Input)
 			h.tools[b.ID] = len(h.items)
 			h.item(e, agent.Item{ID: b.ID, Kind: agent.ItemToolCall, Status: agent.ItemRunning, Tool: call, Raw: providerutil.Raw(b)})
@@ -580,26 +589,48 @@ func (h *historyBuilder) add(e transcriptEntry) {
 				}
 			}
 		case "tool_result":
-			idx, ok := h.tools[b.ToolUseID]
-			if !ok {
-				continue
+			h.result(e, b.ToolUseID, b.Content, b.IsError, structured)
+		default:
+			if slices.Contains(serverToolResultTypes, b.Type) {
+				h.result(e, b.ToolUseID, b.Content, b.IsError || isErrorContent(b.Content), nil)
 			}
-			delete(h.tools, b.ToolUseID)
-			it := &h.items[idx]
-			it.Tool.Output, it.Tool.Images = toolResultContent(b.Content)
-			it.Tool.IsError = b.IsError
-			it.Tool.OutputData = structured
-			it.Status = agent.ItemDone
-			if b.IsError {
-				it.Status = agent.ItemFailed
-				continue
-			}
-			// Like the live stream, the TaskCreate list is kept apart from
-			// TodoWrite snapshots.
-			if steps, ok := applyPlanTool(h.plan, it.Tool.Name, it.Tool.Input, structured); ok {
-				h.plan = steps
-				h.planItem(e, b.ToolUseID, steps)
-			}
+		}
+	}
+}
+
+// result completes a tool call with its result the way the live stream
+// does. Transcripts do not record why a call did not run, so only an
+// interrupted shell call reads as cancelled. A background Agent launch
+// reads as done, because its completion is a later prompt.
+func (h *historyBuilder) result(e transcriptEntry, id string, content json.RawMessage, isError bool, structured json.RawMessage) {
+	idx, ok := h.tools[id]
+	if !ok {
+		return
+	}
+	delete(h.tools, id)
+	it := &h.items[idx]
+	applyToolResult(it, content, isError, structured, "")
+	if it.Status == agent.ItemRunning {
+		it.Status = agent.ItemDone
+	}
+	if isError {
+		return
+	}
+	// Like the live stream, the TaskCreate list is kept apart from
+	// TodoWrite snapshots.
+	if steps, ok := applyPlanTool(h.plan, it.Tool.Name, it.Tool.Input, structured); ok {
+		h.plan = steps
+		h.planItem(e, id, steps)
+	}
+}
+
+// endOrphanedCalls cancels the tool calls that never got a result although
+// a later turn started, such as after the CLI was stopped mid-call. Calls
+// of the last turn may still be running.
+func (h *historyBuilder) endOrphanedCalls() {
+	for _, idx := range h.tools {
+		if it := &h.items[idx]; it.TurnID != h.turn {
+			it.Status = agent.ItemCancelled
 		}
 	}
 }

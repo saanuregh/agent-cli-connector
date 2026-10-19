@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -99,8 +100,10 @@ func TestLiveToolsAndGate(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(asked) != 1 || asked[0] != "bash" {
-		t.Errorf("permission requests %v, want [bash]", asked)
+	// The model may run bash more than once; only bash is gated, never the
+	// host tool.
+	if len(asked) == 0 || slices.ContainsFunc(asked, func(name string) bool { return name != "bash" }) {
+		t.Errorf("permission requests %v, want only bash", asked)
 	}
 }
 
@@ -440,6 +443,8 @@ func TestLiveBridgeSurvivesNewSession(t *testing.T) {
 	cfg.Tools = []agent.Tool{{
 		Name:        "secret_number",
 		Description: "Returns the secret number.",
+		// Read-only mode refuses host tools that are not marked read-only.
+		ReadOnly: true,
 		Handler: func(context.Context, agent.ToolCallRequest) (agent.ToolResult, error) {
 			return agent.TextResult("4242"), nil
 		},

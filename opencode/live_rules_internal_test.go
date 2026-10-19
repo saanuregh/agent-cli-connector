@@ -281,6 +281,11 @@ func TestLiveGrantKeepsConfigDenies(t *testing.T) {
 			}
 			if mode == agent.PermissionReadOnly {
 				want[[2]string{"edit", "docs/a.md"}], want[[2]string{"edit", "docs/b.md"}] = "deny", "deny"
+				// Everything but the kept actions is denied.
+				for _, action := range []string{"webfetch", "websearch", "github_create_issue", "execute", "worktree_create", "session_rename"} {
+					want[[2]string{action, "*"}] = "deny"
+				}
+				want[[2]string{"read", "src/main.go"}], want[[2]string{"glob", "*"}] = "allow", "allow"
 			}
 			for k, w := range want {
 				if got := ask(k[0], k[1]); got != w {

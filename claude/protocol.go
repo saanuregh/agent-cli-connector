@@ -76,7 +76,6 @@ type assistantFrame struct {
 		Model      string         `json:"model"`
 		Content    []contentBlock `json:"content"`
 		StopReason *string        `json:"stop_reason"`
-		Usage      *apiUsage      `json:"usage"`
 	} `json:"message"`
 	ParentToolUseID *string  `json:"parent_tool_use_id"`
 	Error           string   `json:"error"`
@@ -94,7 +93,6 @@ type assistantFrame struct {
 
 type userFrame struct {
 	Message struct {
-		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
 	} `json:"message"`
 	ParentToolUseID           *string         `json:"parent_tool_use_id"`
@@ -117,15 +115,13 @@ type streamFrame struct {
 		Index        int          `json:"index"`
 		ContentBlock contentBlock `json:"content_block"`
 		Delta        struct {
-			Type        string  `json:"type"`
-			Text        string  `json:"text"`
-			Thinking    string  `json:"thinking"`
-			PartialJSON string  `json:"partial_json"`
-			StopReason  *string `json:"stop_reason"`
+			Type        string `json:"type"`
+			Text        string `json:"text"`
+			Thinking    string `json:"thinking"`
+			PartialJSON string `json:"partial_json"`
 		} `json:"delta"`
 		Message struct {
 			ID    string          `json:"id"`
-			Model string          `json:"model"`
 			Usage json.RawMessage `json:"usage"`
 		} `json:"message"`
 		Usage json.RawMessage `json:"usage"`
@@ -168,11 +164,6 @@ type resultFrame struct {
 		Name  string          `json:"name"`
 		Input json.RawMessage `json:"input"`
 	} `json:"deferred_tool_use"`
-	PermissionDenials []struct {
-		ToolName  string          `json:"tool_name"`
-		ToolUseID string          `json:"tool_use_id"`
-		ToolInput json.RawMessage `json:"tool_input"`
-	} `json:"permission_denials"`
 }
 
 type initFrame struct {
@@ -180,7 +171,6 @@ type initFrame struct {
 	Tools          []string `json:"tools"`
 	Model          string   `json:"model"`
 	PermissionMode string   `json:"permissionMode"`
-	SlashCommands  []string `json:"slash_commands"`
 	Version        string   `json:"claude_code_version"`
 	MCPServers     []struct {
 		Name   string `json:"name"`
@@ -193,7 +183,6 @@ type initFrame struct {
 		Plugin  string `json:"plugin"`
 		Type    string `json:"type"`
 		Message string `json:"message"`
-		Path    string `json:"path"`
 	} `json:"plugin_errors"`
 }
 
@@ -324,20 +313,4 @@ func imagesOfBlocks(blocks []contentBlock) []agent.Image {
 		}
 	}
 	return out
-}
-
-// textOf flattens tool_result or message content to text.
-func textOf(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return s
-	}
-	var blocks []contentBlock
-	if json.Unmarshal(raw, &blocks) != nil {
-		return ""
-	}
-	return textOfBlocks(blocks)
 }

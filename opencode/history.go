@@ -17,17 +17,15 @@ type historyMessage struct {
 	Time struct {
 		Created int64 `json:"created"`
 	} `json:"time"`
-	Text        string                   `json:"text"`
-	Metadata    json.RawMessage          `json:"metadata"`
-	Content     []historyPart            `json:"content"`
-	Error       *structuredError         `json:"error"`
-	Status      string                   `json:"status"`
-	Summary     string                   `json:"summary"`
-	Command     string                   `json:"command"`
-	Exit        json.RawMessage          `json:"exit"`
-	Output      *struct{ Output string } `json:"output"`
-	Description string                   `json:"description"`
-	Name        string                   `json:"name"`
+	Text     string                   `json:"text"`
+	Metadata json.RawMessage          `json:"metadata"`
+	Content  []historyPart            `json:"content"`
+	Error    *structuredError         `json:"error"`
+	Status   string                   `json:"status"`
+	Summary  string                   `json:"summary"`
+	Command  string                   `json:"command"`
+	Exit     json.RawMessage          `json:"exit"`
+	Output   *struct{ Output string } `json:"output"`
 }
 
 type historyPart struct {
@@ -88,16 +86,18 @@ func allMessages(ctx context.Context, c *Client, sid string) ([]json.RawMessage,
 }
 
 // readHistory reads a session's transcript: all of it when limit is zero,
-// otherwise only as many of the newest messages as the page needs.
-func readHistory(ctx context.Context, c *Client, sid string, limit, offset int) ([]agent.Item, error) {
+// otherwise only as many of the newest messages as the page needs. Tool
+// call IDs start with toolPrefix, as in a live session; see historyItems.
+func readHistory(ctx context.Context, c *Client, sid, toolPrefix string, limit, offset int) ([]agent.Item, error) {
 	if limit <= 0 {
 		msgs, err := allMessages(ctx, c, sid)
 		if err != nil {
 			return nil, err
 		}
-		return providerutil.LastPage(historyItems(msgs), 0, offset), nil
+		return providerutil.LastPage(historyItems(msgs, toolPrefix), 0, offset), nil
 	}
 	var newest []json.RawMessage
+	count := 0
 	cursor := ""
 	for {
 		page, next, err := listMessages(ctx, c, sid, "desc", cursor, 100)
@@ -105,15 +105,14 @@ func readHistory(ctx context.Context, c *Client, sid string, limit, offset int) 
 			return nil, err
 		}
 		newest = append(newest, page...)
+		for _, raw := range page {
+			count += len(messageItems(raw, "", ""))
+		}
 		// The oldest message read must end an execution, so the next one
 		// starts a turn, or the items before it would carry no turn ID.
-		if next == "" || len(newest) > 0 && messageType(newest[len(newest)-1]) == "idle" {
-			asc := slices.Clone(newest)
-			slices.Reverse(asc)
-			items := historyItems(asc)
-			if next == "" || len(items) >= limit+offset {
-				return providerutil.LastPage(items, limit, offset), nil
-			}
+		if next == "" || count >= limit+offset && len(newest) > 0 && messageType(newest[len(newest)-1]) == "idle" {
+			slices.Reverse(newest)
+			return providerutil.LastPage(historyItems(newest, toolPrefix), limit, offset), nil
 		}
 		cursor = next
 	}
@@ -164,77 +163,86 @@ func messageTurns(msgs []json.RawMessage) []string {
 }
 
 // historyItems converts messages, oldest first, to transcript items. Each
-// item's TurnID is its turn; see messageTurns.
-func historyItems(msgs []json.RawMessage) []agent.Item {
+// item's TurnID is its turn; see messageTurns. Tool call IDs start with
+// toolPrefix: a live session gives a subagent's tool calls the prefix
+// "<subagent session ID>/".
+func historyItems(msgs []json.RawMessage, toolPrefix string) []agent.Item {
 	var items []agent.Item
 	turnOf := messageTurns(msgs)
 	for i, raw := range msgs {
-		turn := turnOf[i]
-		var m historyMessage
-		if json.Unmarshal(raw, &m) != nil {
-			continue
+		items = append(items, messageItems(raw, turnOf[i], toolPrefix)...)
+	}
+	return items
+}
+
+// messageItems converts one message of turn to transcript items. A failed
+// step's error is not an item, as in a live session, which reports it as
+// a notice and in the turn's result.
+func messageItems(raw json.RawMessage, turn, toolPrefix string) []agent.Item {
+	var items []agent.Item
+	var m historyMessage
+	if json.Unmarshal(raw, &m) != nil {
+		return nil
+	}
+	at := providerutil.FromUnixMilli(m.Time.Created)
+	add := func(it agent.Item) {
+		it.TurnID, it.Time = turn, at
+		items = append(items, it)
+	}
+	switch m.Type {
+	case "user", "synthetic":
+		var meta struct {
+			ClientID string `json:"clientID"`
 		}
-		at := providerutil.FromUnixMilli(m.Time.Created)
-		add := func(it agent.Item) {
-			it.TurnID, it.Time = turn, at
-			items = append(items, it)
+		_ = json.Unmarshal(m.Metadata, &meta)
+		add(agent.Item{ID: m.ID, Kind: agent.ItemUserMessage, Status: agent.ItemDone, Text: m.Text, ClientID: meta.ClientID, Synthetic: m.Type == "synthetic", Raw: raw})
+	case "system", "skill":
+		add(agent.Item{ID: m.ID, Kind: agent.ItemOther, Status: agent.ItemDone, Text: m.Text, Raw: raw})
+	case "shell":
+		call := &agent.ToolCall{Name: "shell", Kind: agent.ToolShell, Command: m.Command}
+		if m.Output != nil {
+			call.Output = m.Output.Output
 		}
-		switch m.Type {
-		case "user", "synthetic":
-			var meta struct {
-				ClientID string `json:"clientID"`
+		var code *int
+		if json.Unmarshal(m.Exit, &code) == nil {
+			call.ExitCode = code
+		}
+		status := agent.ItemDone
+		switch m.Status {
+		case "running":
+			status = agent.ItemRunning
+		case "timeout", "killed":
+			status = agent.ItemFailed
+		}
+		add(agent.Item{ID: m.ID, Kind: agent.ItemToolCall, Status: status, Tool: call, Raw: raw})
+	case "compaction":
+		it := agent.Item{ID: m.ID, Kind: agent.ItemCompaction, Status: agent.ItemDone, Text: m.Summary, Raw: raw}
+		switch m.Status {
+		case "running":
+			it.Status = agent.ItemRunning
+		case "failed":
+			it.Status = agent.ItemFailed
+			if m.Error != nil {
+				it.Text = m.Error.Message
 			}
-			_ = json.Unmarshal(m.Metadata, &meta)
-			add(agent.Item{ID: m.ID, Kind: agent.ItemUserMessage, Status: agent.ItemDone, Text: m.Text, ClientID: meta.ClientID, Synthetic: m.Type == "synthetic", Raw: raw})
-		case "system", "skill":
-			add(agent.Item{ID: m.ID, Kind: agent.ItemOther, Status: agent.ItemDone, Text: m.Text, Raw: raw})
-		case "shell":
-			call := &agent.ToolCall{Name: "shell", Kind: agent.ToolShell, Command: m.Command}
-			if m.Output != nil {
-				call.Output = m.Output.Output
-			}
-			var code int
-			if json.Unmarshal(m.Exit, &code) == nil {
-				call.ExitCode = &code
-			}
-			status := agent.ItemDone
-			switch m.Status {
-			case "running":
-				status = agent.ItemRunning
-			case "timeout", "killed":
-				status = agent.ItemFailed
-			}
-			add(agent.Item{ID: m.ID, Kind: agent.ItemToolCall, Status: status, Tool: call, Raw: raw})
-		case "compaction":
-			it := agent.Item{ID: m.ID, Kind: agent.ItemCompaction, Status: agent.ItemDone, Text: m.Summary, Raw: raw}
-			switch m.Status {
-			case "running":
-				it.Status = agent.ItemRunning
-			case "failed":
-				it.Status = agent.ItemFailed
-				if m.Error != nil {
-					it.Text = m.Error.Message
+		}
+		add(it)
+	case "assistant":
+		ordinals := map[string]int{}
+		for _, part := range m.Content {
+			switch part.Type {
+			case "text", "reasoning":
+				kind := agent.ItemAssistantMessage
+				if part.Type == "reasoning" {
+					kind = agent.ItemReasoning
 				}
-			}
-			add(it)
-		case "assistant":
-			ordinals := map[string]int{}
-			for _, part := range m.Content {
-				switch part.Type {
-				case "text", "reasoning":
-					kind := agent.ItemAssistantMessage
-					if part.Type == "reasoning" {
-						kind = agent.ItemReasoning
-					}
-					id := m.ID + ":" + part.Type + ":" + strconv.Itoa(ordinals[part.Type])
-					ordinals[part.Type]++
-					add(agent.Item{ID: id, Kind: kind, Status: agent.ItemDone, Text: part.Text})
-				case "tool":
-					add(historyTool(part))
-				}
-			}
-			if m.Error != nil && m.Error.Type != "aborted" {
-				add(agent.Item{ID: m.ID + ":error", Kind: agent.ItemError, Status: agent.ItemDone, Text: m.Error.Message})
+				id := m.ID + ":" + part.Type + ":" + strconv.Itoa(ordinals[part.Type])
+				ordinals[part.Type]++
+				add(agent.Item{ID: id, Kind: kind, Status: agent.ItemDone, Text: part.Text})
+			case "tool":
+				it := historyTool(part)
+				it.ID = toolPrefix + it.ID
+				add(it)
 			}
 		}
 	}
@@ -279,4 +287,38 @@ func historyTool(part historyPart) agent.Item {
 		}
 	}
 	return it
+}
+
+// subagentToolItem returns the ID a live session gives the tool call that
+// ran subagent session sub, as seen from session sessionID: the call's ID,
+// prefixed with its session's ID when that is a subagent too. It returns
+// "" when the call is not found.
+func subagentToolItem(ctx context.Context, c *Client, sessionID, sub string) string {
+	var native nativeSession
+	if c.data(ctx, "GET", sessionPath(sub, ""), nil, &native) != nil || native.ParentID == "" {
+		return ""
+	}
+	msgs, err := allMessages(ctx, c, native.ParentID)
+	if err != nil {
+		return ""
+	}
+	prefix := ""
+	if native.ParentID != sessionID {
+		prefix = native.ParentID + "/"
+	}
+	for _, raw := range msgs {
+		var m historyMessage
+		if json.Unmarshal(raw, &m) != nil || m.Type != "assistant" {
+			continue
+		}
+		for _, part := range m.Content {
+			var meta struct {
+				SessionID string `json:"sessionID"`
+			}
+			if part.Type == "tool" && json.Unmarshal(part.State.Metadata, &meta) == nil && meta.SessionID == sub {
+				return prefix + part.ID
+			}
+		}
+	}
+	return ""
 }

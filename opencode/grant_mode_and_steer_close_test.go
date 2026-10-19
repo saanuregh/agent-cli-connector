@@ -208,7 +208,7 @@ func TestGrantDuringModeChange(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	// readOnly's deny decides edits, so the grant answers no ask there.
-	if !slices.Contains(kept, "edit:*=deny") || slices.Contains(kept, "edit:*=allow") {
+	if !slices.Contains(kept, "*:*=deny") || slices.Contains(kept, "edit:*=allow") {
 		t.Fatalf("the server kept another mode's rules: %v", kept)
 	}
 }

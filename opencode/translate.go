@@ -191,11 +191,57 @@ func (s *Session) isBackgroundLocked(sid string) bool {
 			return false
 		}
 		if ch.task != nil && ch.task.Subagent != nil && ch.task.Subagent.Background {
-			return true
+			return ch.task.Status == agent.TaskRunning
 		}
 		sid = ch.parent
 	}
 	return false
+}
+
+// inSubagentLocked reports whether session sid is subagent session root or
+// nested in it.
+func (s *Session) inSubagentLocked(sid, root string) bool {
+	for range 64 {
+		if sid == root {
+			return true
+		}
+		ch := s.tr.children[sid]
+		if ch == nil {
+			return false
+		}
+		sid = ch.parent
+	}
+	return false
+}
+
+// closeSubagentItemsLocked completes the open items of subagent session
+// root and of those nested in it once root stopped: it sends no more
+// events for them. Tool calls that never ended are cancelled; text ends
+// done when the subagent completed, else cancelled.
+func (s *Session) closeSubagentItemsLocked(root string, meta agent.EventMeta) {
+	t := &s.tr
+	textStatus := agent.ItemCancelled
+	if ch := t.children[root]; ch != nil && ch.task != nil && ch.task.Status == agent.TaskCompleted {
+		textStatus = agent.ItemDone
+	}
+	for _, itemID := range slices.Sorted(maps.Keys(t.texts)) {
+		ot := t.texts[itemID]
+		if !s.inSubagentLocked(ot.sc.subagent, root) {
+			continue
+		}
+		s.emit(&agent.ItemCompleted{EventMeta: meta, Item: agent.Item{ID: itemID, Kind: ot.kind, Status: textStatus, Text: ot.b.String(), ParentID: ot.sc.parent, SubagentID: ot.sc.subagent}})
+		delete(t.texts, itemID)
+	}
+	for _, itemID := range slices.Sorted(maps.Keys(t.tools)) {
+		item := t.tools[itemID]
+		if !s.inSubagentLocked(item.SubagentID, root) {
+			continue
+		}
+		item.Status = agent.ItemCancelled
+		s.emit(&agent.ItemCompleted{EventMeta: meta, Item: item.Clone()})
+		delete(t.tools, itemID)
+		delete(t.calls, itemID)
+	}
 }
 
 // releaseHeldLocked returns and clears the held end of turn, or nil.
@@ -485,7 +531,7 @@ func (s *Session) sessionEvent(sc scope, typ string, data json.RawMessage, meta 
 			InputID string `json:"inputID"`
 		}
 		_ = json.Unmarshal(data, &d)
-		t.compaction = "compaction:" + cmp.Or(d.InputID, eventID(meta))
+		t.compaction = cmp.Or(d.InputID, messageIDOfEvent(eventID(meta)))
 		s.rt.Emit(&agent.StatusChanged{Status: agent.StatusCompacting})
 		s.rt.Emit(&agent.Compaction{EventMeta: meta, Trigger: d.Reason})
 		s.emit(&agent.ItemStarted{EventMeta: meta, Item: agent.Item{ID: t.compaction, Kind: agent.ItemCompaction, Status: agent.ItemRunning}})
@@ -499,7 +545,7 @@ func (s *Session) sessionEvent(sc scope, typ string, data json.RawMessage, meta 
 			} `json:"error"`
 		}
 		_ = json.Unmarshal(data, &d)
-		id := cmp.Or(t.compaction, "compaction:"+eventID(meta))
+		id := cmp.Or(t.compaction, messageIDOfEvent(eventID(meta)))
 		t.compaction = ""
 		ev := &agent.Compaction{EventMeta: meta, Done: true, Trigger: d.Reason, Summary: d.Text}
 		item := agent.Item{ID: id, Kind: agent.ItemCompaction, Status: agent.ItemDone, Text: d.Text}
@@ -870,6 +916,7 @@ func (s *Session) taskReport(item inboxItem, meta agent.EventMeta) bool {
 		ch.task.Status = agent.TaskCompleted
 		ch.task.Output = subagentOutput(item.Payload.Text)
 	}
+	s.closeSubagentItemsLocked(ch.id, meta)
 	s.rt.Emit(&agent.TaskUpdated{EventMeta: meta, Task: ch.task.Clone()})
 	return true
 }
@@ -885,6 +932,12 @@ func (s *Session) toolEndLocked(sc scope, typ string, data json.RawMessage, meta
 	_ = json.Unmarshal(data, &d)
 	id := sc.prefix + d.ID
 	item := t.tools[id]
+	if item == nil && t.itemSeen[id] {
+		// The item already completed, such as one a turn's end or its
+		// subagent's stop cancelled.
+		s.raw(typ, meta)
+		return
+	}
 	delete(t.tools, id)
 	if item == nil {
 		item = &agent.Item{ID: id, Kind: agent.ItemToolCall, ParentID: sc.parent, SubagentID: sc.subagent, Tool: &agent.ToolCall{Kind: agent.ToolOther}}
@@ -938,6 +991,9 @@ func (s *Session) toolEndLocked(sc scope, typ string, data json.RawMessage, meta
 			default:
 				ch.task.Status = agent.TaskFailed
 				ch.task.Error = call.Output
+			}
+			if ch.task.Status != agent.TaskRunning {
+				s.closeSubagentItemsLocked(ch.id, meta)
 			}
 			s.rt.Emit(&agent.TaskUpdated{EventMeta: meta, Task: ch.task.Clone()})
 		}
@@ -1009,6 +1065,15 @@ func eventID(meta agent.EventMeta) string {
 	return e.ID
 }
 
+// messageIDOfEvent is the ID of the message OpenCode records for event id,
+// such as a compaction started without an input.
+func messageIDOfEvent(id string) string {
+	if rest, ok := strings.CutPrefix(id, "evt_"); ok {
+		return "msg_" + rest
+	}
+	return id
+}
+
 func withTurn(meta agent.EventMeta, turn string) agent.EventMeta {
 	meta.TurnID = turn
 	return meta
@@ -1071,13 +1136,18 @@ func (s *Session) finishTurnLocked(id string, res *agent.TurnResult) {
 	}
 	t.releaseHeldLocked(id)
 	// Background subagents outlive the turn: their items stay open and
-	// their requests pending.
+	// their requests pending. Text an interrupt cut off is cancelled, and
+	// tool calls that never ended are, as with Pi.
+	textStatus := agent.ItemDone
+	if res.Status == agent.TurnInterrupted {
+		textStatus = agent.ItemCancelled
+	}
 	for _, itemID := range slices.Sorted(maps.Keys(t.texts)) {
 		ot := t.texts[itemID]
 		if s.isBackgroundLocked(ot.sc.subagent) {
 			continue
 		}
-		s.emit(&agent.ItemCompleted{EventMeta: agent.EventMeta{TurnID: id}, Item: agent.Item{ID: itemID, Kind: ot.kind, Status: agent.ItemDone, Text: ot.b.String(), ParentID: ot.sc.parent, SubagentID: ot.sc.subagent}})
+		s.emit(&agent.ItemCompleted{EventMeta: agent.EventMeta{TurnID: id}, Item: agent.Item{ID: itemID, Kind: ot.kind, Status: textStatus, Text: ot.b.String(), ParentID: ot.sc.parent, SubagentID: ot.sc.subagent}})
 		delete(t.texts, itemID)
 	}
 	for _, itemID := range slices.Sorted(maps.Keys(t.tools)) {
@@ -1086,11 +1156,9 @@ func (s *Session) finishTurnLocked(id string, res *agent.TurnResult) {
 			continue
 		}
 		item.Status = agent.ItemCancelled
-		if res.Status == agent.TurnSucceeded {
-			item.Status = agent.ItemDone
-		}
 		s.emit(&agent.ItemCompleted{EventMeta: agent.EventMeta{TurnID: id}, Item: item.Clone()})
 		delete(t.tools, itemID)
+		delete(t.calls, itemID)
 	}
 	for _, req := range s.rt.PendingRequests() {
 		if s.isBackgroundLocked(t.reqSession[req.RequestID()]) {

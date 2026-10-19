@@ -525,6 +525,9 @@ func TestPrewarmAndClaim(t *testing.T) {
 	if !slices.Contains(h.Cmd.Args, "--await-claim") || !strings.HasPrefix(filepath.Base(spareDir), "claude-spare-") || filepath.Dir(spareDir) != filepath.Clean(os.TempDir()) {
 		t.Errorf("spare launch: dir %s args %v", spareDir, h.Cmd.Args)
 	}
+	if _, err := spare.Claim(ctx, agent.Config{Cwd: cwd, UnsetEnv: []string{"SECRET"}}); !errors.Is(err, agent.ErrUnsupported) {
+		t.Errorf("claim with UnsetEnv: %v", err)
+	}
 	sess, err := spare.Claim(ctx, agent.Config{Cwd: cwd, Model: "m2", PermissionMode: agent.PermissionAcceptEdits, Title: "T"})
 	if err != nil {
 		t.Fatal(err)

@@ -148,7 +148,9 @@ func (s *Session) Review(ctx context.Context, target ReviewTarget) (*agent.Turn,
 // revert fails, is forked before turnID with this session's settings, and
 // the session continues on the fork: its ID changes, which a
 // SessionUpdated event reports, and the original thread stays unchanged.
-// Pending asynchronous questions from the removed turns are withdrawn.
+// Pending asynchronous questions from the removed turns are withdrawn, and
+// an agent.ItemsRemoved event lists the items this session reported for
+// them; items from before a resume are not listed.
 func (s *Session) Rewind(ctx context.Context, turnID string) error {
 	if !s.rt.Idle() {
 		return errors.New("codex: cannot rewind while a turn runs")

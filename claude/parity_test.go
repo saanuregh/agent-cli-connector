@@ -129,7 +129,9 @@ func TestMCPServersViaControlAndTimeouts(t *testing.T) {
 	ctx := context.Background()
 	p := claude.New(claude.Options{Spawner: spawner})
 
-	sess, err := p.StartSession(ctx, agent.Config{MCPServers: servers})
+	// Servers without headers or env go on the command line.
+	plain := map[string]agent.MCPServer{"remote": {URL: "https://mcp.example.com", ToolTimeout: 65 * time.Minute}}
+	sess, err := p.StartSession(ctx, agent.Config{MCPServers: plain})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +142,8 @@ func TestMCPServersViaControlAndTimeouts(t *testing.T) {
 	}
 	sess.Close()
 
-	sess, err = p.StartSession(ctx, agent.Config{MCPServers: servers, ProviderOptions: &claude.SessionOptions{MCPViaControl: true}})
+	// A header moves every server to the control channel without asking.
+	sess, err = p.StartSession(ctx, agent.Config{MCPServers: servers})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,17 +529,17 @@ func TestTranslatorParity(t *testing.T) {
 	}
 }
 
-func TestPermissionAllowSessionWithoutSuggestions(t *testing.T) {
+func TestPermissionWithoutSuggestionsOffersNoRules(t *testing.T) {
 	spawner, _ := fakeproc.Spawner(t, func(h *fakeproc.Harness) {
 		if handshake(h) == nil {
 			return
 		}
 		h.Send(map[string]any{"type": "control_request", "request_id": "p1", "request": map[string]any{
-			"subtype": "can_use_tool", "tool_name": "WebFetch", "input": map[string]any{"url": "https://x"}, "tool_use_id": "tw"}})
+			"subtype": "can_use_tool", "tool_name": "Bash", "input": map[string]any{"command": "ls"}, "tool_use_id": "tb"}})
 		resp := h.RecvWhere(func(m map[string]any) bool { return fakeproc.Str(m, "response", "request_id") == "p1" })
-		if fakeproc.Str(resp, "response", "response", "updatedPermissions", 0, "type") != "addRules" ||
-			fakeproc.Str(resp, "response", "response", "updatedPermissions", 0, "rules", 0, "toolName") != "WebFetch" ||
-			fakeproc.Str(resp, "response", "response", "updatedPermissions", 0, "destination") != "session" {
+		if fakeproc.Str(resp, "response", "response", "behavior") != "allow" ||
+			fakeproc.Str(resp, "response", "response", "decisionClassification") != "user_temporary" ||
+			fakeproc.Get(resp, "response", "response", "updatedPermissions") != nil {
 			t.Errorf("answer = %v", resp)
 		}
 		h.WaitClosed()
@@ -545,7 +548,7 @@ func TestPermissionAllowSessionWithoutSuggestions(t *testing.T) {
 	sess, err := claude.New(claude.Options{Spawner: spawner}).StartSession(context.Background(), agent.Config{Handlers: agent.Handlers{
 		Permission: func(ctx context.Context, req *agent.PermissionRequest) agent.PermissionResponse {
 			decisions = req.Decisions
-			return agent.PermissionResponse{Decision: agent.DecisionAllowSession}
+			return agent.PermissionResponse{Decision: agent.DecisionAllow}
 		},
 	}})
 	if err != nil {
@@ -554,7 +557,7 @@ func TestPermissionAllowSessionWithoutSuggestions(t *testing.T) {
 	log := record(sess)
 	log.wait(t, "RequestResolved", func(ev agent.Event) bool { _, ok := ev.(*agent.RequestResolved); return ok })
 	sess.Close()
-	if !slices.Contains(decisions, agent.DecisionAllowSession) {
+	if !slices.Equal(decisions, []agent.PermissionDecision{agent.DecisionAllow, agent.DecisionDeny, agent.DecisionCancel}) {
 		t.Errorf("decisions = %v", decisions)
 	}
 }
@@ -698,5 +701,111 @@ func TestTailShellOutput(t *testing.T) {
 				t.Errorf("delta %q after the call completed", ev.Delta)
 			}
 		}
+	}
+}
+
+func TestTailShellOutputSkipsForeignTempDir(t *testing.T) {
+	tmp := t.TempDir()
+	const id = "11111111-2222-4333-8444-555555555555"
+	planted := filepath.Join(tmp, "planted")
+	if err := os.MkdirAll(filepath.Join(planted, "-proj", id, "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(planted, "-proj", id, "tasks", "t1.output"), []byte("planted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink stands in for a directory another user created first.
+	if err := os.Symlink(planted, filepath.Join(tmp, "claude-"+strconv.Itoa(os.Getuid()))); err != nil {
+		t.Fatal(err)
+	}
+	spawner, _ := fakeproc.Spawner(t, func(h *fakeproc.Harness) {
+		if handshake(h) == nil {
+			return
+		}
+		uuid := startTurn(h)
+		h.Send(assistantMsg("m1", "w1", nil, map[string]any{"type": "tool_use", "id": "tu1", "name": "Bash", "input": map[string]any{"command": "make"}}))
+		h.Send(map[string]any{"type": "system", "subtype": "task_started", "task_id": "t1", "tool_use_id": "tu1", "task_type": "local_bash", "description": "make"})
+		req := h.RecvWhere(isControl("get_task_output"))
+		h.Send(controlResponse(fakeproc.Str(req, "request_id"), map[string]any{"output": "real\n", "total_bytes": 5}))
+		h.Send(toolResult("w2", "tu1", "real", false))
+		h.Send(map[string]any{"type": "result", "subtype": "success", "result": "ok", "user_message_uuids": []any{uuid}, "usage": map[string]any{}})
+		for {
+			req := h.RecvWhere(func(m map[string]any) bool { return isControl("get_task_output")(m) || m == nil })
+			if req == nil {
+				return
+			}
+			h.Send(controlResponse(fakeproc.Str(req, "request_id"), map[string]any{"output": "real\n", "total_bytes": 5}))
+		}
+	})
+	ctx := context.Background()
+	sess, err := claude.New(claude.Options{Spawner: spawner}).StartSession(ctx, agent.Config{
+		SessionID: id, Env: map[string]string{"CLAUDE_CODE_TMPDIR": tmp}, ProviderOptions: &claude.SessionOptions{TailShellOutput: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	log := record(sess)
+	if _, err := sess.Run(ctx, agent.Text("build")); err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range log.all() {
+		if d, ok := ev.(*agent.ToolOutputDelta); ok && strings.Contains(d.Delta, "planted") {
+			t.Errorf("read a file from a foreign temp directory: %q", d.Delta)
+		}
+	}
+}
+
+func TestRewindRestartEndsBackgroundWork(t *testing.T) {
+	configDir, cwd := t.TempDir(), t.TempDir()
+	const id = "11111111-2222-4333-8444-555555555555"
+	writeTranscript(t, configDir, cwd, id, sampleTranscript()[:7])
+	var mu sync.Mutex
+	spawns := 0
+	spawner, _ := fakeproc.Spawner(t, func(h *fakeproc.Harness) {
+		mu.Lock()
+		spawns++
+		n := spawns
+		mu.Unlock()
+		if handshake(h) == nil {
+			return
+		}
+		if n == 1 {
+			uuid := startTurn(h)
+			h.Send(assistantMsg("m1", "w1", nil, map[string]any{"type": "tool_use", "id": "spawn1", "name": "Agent", "input": map[string]any{"prompt": "look"}}))
+			h.Send(map[string]any{"type": "system", "subtype": "task_started", "task_id": "ag1", "tool_use_id": "spawn1", "task_type": "local_agent", "is_backgrounded": true})
+			res := toolResult("w2", "spawn1", "launched", false)
+			res["tool_use_result"] = map[string]any{"agentId": "ag1", "status": "async_launched"}
+			h.Send(res)
+			h.Send(assistantMsg("m2", "w3", "spawn1", map[string]any{"type": "tool_use", "id": "sub1", "name": "Bash", "input": map[string]any{"command": "ls"}}))
+			h.Send(map[string]any{"type": "result", "subtype": "success", "result": "ok", "user_message_uuids": []any{uuid}, "usage": map[string]any{}})
+			refuseNativeRewind(h)
+		}
+		h.WaitClosed()
+	})
+	ctx := context.Background()
+	sess, err := claude.New(claude.Options{Spawner: spawner}).StartSession(ctx, agent.Config{
+		Cwd: cwd, Resume: id, Env: map[string]string{"CLAUDE_CONFIG_DIR": configDir},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	log := record(sess)
+	if _, err := sess.Run(ctx, agent.Text("spawn")); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Rewind(ctx, "u2"); err != nil {
+		t.Fatal(err)
+	}
+	log.wait(t, "stopped task", func(ev agent.Event) bool {
+		u, ok := ev.(*agent.TaskUpdated)
+		return ok && u.Task.ID == "ag1" && u.Task.Status == agent.TaskStopped
+	})
+	for _, want := range []string{"spawn1", "sub1"} {
+		log.wait(t, "cancelled "+want, func(ev agent.Event) bool {
+			c, ok := ev.(*agent.ItemCompleted)
+			return ok && c.Item.ID == want && c.Item.Status == agent.ItemCancelled
+		})
 	}
 }

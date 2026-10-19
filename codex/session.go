@@ -151,8 +151,8 @@ type threadResponse struct {
 }
 
 func (p *Provider) openSession(ctx context.Context, client *Client, owned bool, cfg agent.Config, opts SessionOptions) (*Session, error) {
-	if len(cfg.DisallowedTools) > 0 {
-		return nil, providerkit.Unsupported(Name, "DisallowedTools")
+	if err := refusedConfig(cfg, owned); err != nil {
+		return nil, err
 	}
 	outputSchema, err := opts.outputSchema(cfg.OutputSchema)
 	if err != nil {
@@ -329,9 +329,10 @@ func permissionSettings(mode agent.PermissionMode) (approval any, sandbox, revie
 	switch mode {
 	case "":
 		return nil, "", ""
-	case agent.PermissionDefault, agent.PermissionAcceptEdits, agent.PermissionPlan:
+	case agent.PermissionDefault, agent.PermissionAcceptEdits:
 		return "on-request", "workspace-write", ""
-	case agent.PermissionReadOnly:
+	case agent.PermissionReadOnly, agent.PermissionPlan:
+		// Plan mode promises no changes, so it runs read-only.
 		return "on-request", "read-only", ""
 	case agent.PermissionDontAsk:
 		return "never", "workspace-write", ""
@@ -1081,8 +1082,9 @@ func (s *Session) SetEffort(ctx context.Context, effort agent.Effort) error {
 }
 
 // SetPermissionMode changes the approval policy and sandbox for later
-// turns. PermissionPlan switches the plan collaboration mode on; any other
-// mode switches it off.
+// turns. PermissionPlan switches the plan collaboration mode and the
+// read-only sandbox on; any other mode switches plan mode off and applies
+// its own sandbox.
 func (s *Session) SetPermissionMode(ctx context.Context, mode agent.PermissionMode) error {
 	approval, sandbox, reviewer := permissionSettings(mode)
 	settings := map[string]any{}
@@ -1161,6 +1163,20 @@ func (s *Session) notify(msg *jsonrpc.Message, line []byte) {
 	s.tr.notify(msg, line)
 }
 
+// refusedConfig refuses the Config restrictions Codex cannot honor,
+// because a restriction is never ignored. owned is false when the session
+// runs on an app-server it does not own, whose environment it cannot
+// change.
+func refusedConfig(cfg agent.Config, owned bool) error {
+	if len(cfg.DisallowedTools) > 0 {
+		return providerkit.Unsupported(Name, "DisallowedTools")
+	}
+	if !owned && len(cfg.UnsetEnv) > 0 {
+		return providerkit.Unsupported(Name, "UnsetEnv on a shared app-server")
+	}
+	return nil
+}
+
 // ignoredConfig names the Config fields Codex cannot honor. owned is false
 // when the session runs on an app-server it does not own.
 func ignoredConfig(cfg agent.Config, owned, experimental bool) []string {
@@ -1176,8 +1192,8 @@ func ignoredConfig(cfg agent.Config, owned, experimental bool) []string {
 			ignored = append(ignored, "MCPServers["+name+"].AlwaysLoad")
 		}
 	}
-	if !owned && (len(cfg.Env) > 0 || len(cfg.UnsetEnv) > 0) {
-		ignored = append(ignored, "Env and UnsetEnv on a shared app-server")
+	if !owned && len(cfg.Env) > 0 {
+		ignored = append(ignored, "Env on a shared app-server")
 	}
 	return ignored
 }
