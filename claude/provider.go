@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -458,18 +459,29 @@ func mcpConfig(servers map[string]agent.MCPServer) map[string]any {
 // mcpViaControl reports whether cfg.MCPServers are registered with the
 // mcp_set_servers control request instead of the --mcp-config flag: when
 // SessionOptions.MCPViaControl asks for it, and whenever a server has
-// headers or environment variables, which other local users could read
-// from the command line.
+// values that may be secrets, which other local users could read from the
+// command line: headers, environment variables, arguments, or a URL with
+// credentials or a query string.
 func mcpViaControl(cfg agent.Config, o SessionOptions) bool {
 	if o.MCPViaControl {
 		return true
 	}
 	for _, srv := range cfg.MCPServers {
-		if (srv.Enabled == nil || *srv.Enabled) && (len(srv.Headers) > 0 || len(srv.Env) > 0) {
+		if (srv.Enabled == nil || *srv.Enabled) && (len(srv.Headers) > 0 || len(srv.Env) > 0 || len(srv.Args) > 0 || urlMayHoldSecret(srv.URL)) {
 			return true
 		}
 	}
 	return false
+}
+
+// urlMayHoldSecret reports whether a server URL has credentials or a query
+// string, or cannot be parsed to tell.
+func urlMayHoldSecret(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	return err != nil || u.User != nil || u.RawQuery != "" || u.ForceQuery
 }
 
 // bypassAllowed reports whether the CLI is launched so that it accepts

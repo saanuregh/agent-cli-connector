@@ -202,6 +202,10 @@ func (s *Session) refreshSwitched(ctx context.Context) error {
 	s.followSessionCwd(st.SessionFile)
 	s.loadCommands(ctx)
 	s.rt.Emit(&agent.SessionUpdated{EventMeta: agent.EventMeta{Raw: st.Raw}, Info: s.Info()})
+	if err := s.checkGate(s.permissionMode()); err != nil {
+		s.rt.Emit(&agent.Notice{Level: agent.NoticeError, Code: "bridge_unloaded",
+			Message: err.Error() + "; Send refuses turns until the bridge loads again or the mode gates nothing"})
+	}
 	return nil
 }
 

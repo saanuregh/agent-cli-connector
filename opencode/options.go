@@ -49,7 +49,8 @@
 //   - PermissionMode is mapped to session permission rules and agents:
 //     default asks before shell commands, edits, and access outside the
 //     working directory; acceptEdits does not ask before edits; plan
-//     switches to the "plan" agent, which only writes its plan; readOnly
+//     switches to the "plan" agent and has readOnly's rules, except that
+//     the plan agent may write its own plan files; readOnly
 //     denies every action except reading files (read, glob, grep), skills,
 //     questions, subagents, host tools marked ReadOnly, and shell commands
 //     and access outside the working directory, which ask as in

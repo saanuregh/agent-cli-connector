@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -576,6 +577,115 @@ func TestPrewarmAndClaim(t *testing.T) {
 	}
 	if _, err := p.Prewarm(ctx, agent.Config{Resume: claimedID}); err == nil {
 		t.Error("Prewarm accepted Resume")
+	}
+}
+
+// TestSpareRegistersMCPServersAfterClaim checks that a spare's servers that
+// go over the control channel are sent after the claim, since a spare
+// refuses mcp_set_servers before it.
+func TestSpareRegistersMCPServersAfterClaim(t *testing.T) {
+	cwd := t.TempDir()
+	subtypes := make(chan []string, 1)
+	spawner, _ := fakeproc.Spawner(t, func(h *fakeproc.Harness) {
+		if handshake(h) == nil {
+			return
+		}
+		var seen []string
+		for len(seen) < 2 {
+			req := h.RecvWhere(func(m map[string]any) bool {
+				return m == nil || isControl("claim_session")(m) || isControl("mcp_set_servers")(m)
+			})
+			if req == nil {
+				return
+			}
+			subtype := fakeproc.Str(req, "request", "subtype")
+			seen = append(seen, subtype)
+			if subtype == "claim_session" {
+				h.Send(controlResponse(fakeproc.Str(req, "request_id"), map[string]any{"status": "ok", "cwd": cwd}))
+			} else {
+				h.Send(controlResponse(fakeproc.Str(req, "request_id"), map[string]any{"added": []any{"srv"}, "removed": []any{}, "errors": map[string]any{}}))
+			}
+		}
+		subtypes <- seen
+		h.WaitClosed()
+	})
+	ctx := context.Background()
+	spare, err := claude.New(claude.Options{Spawner: spawner}).Prewarm(ctx, agent.Config{
+		MCPServers: map[string]agent.MCPServer{"srv": {Command: "srv", Args: []string{"--token", "secret"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spare.Close()
+	sess, err := spare.Claim(ctx, agent.Config{Cwd: cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	if got := <-subtypes; !slices.Equal(got, []string{"claim_session", "mcp_set_servers"}) {
+		t.Errorf("control requests = %v", got)
+	}
+}
+
+// TestClaimRemovesSpareDirAfterExit makes the spare directory unremovable,
+// as Windows does while the process works in it, and checks that the claim
+// removes it once the process exited.
+func TestClaimRemovesSpareDirAfterExit(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Getuid() == 0 {
+		t.Skip("needs directory permissions that stop removal")
+	}
+	cwd := t.TempDir()
+	spawner, started := fakeproc.Spawner(t, func(h *fakeproc.Harness) {
+		if handshake(h) == nil {
+			return
+		}
+		if req := h.RecvWhere(isControl("claim_session")); req != nil {
+			h.Send(controlResponse(fakeproc.Str(req, "request_id"), map[string]any{"status": "ok", "cwd": cwd}))
+		}
+		h.WaitClosed()
+	})
+	ctx := context.Background()
+	spare, err := claude.New(claude.Options{Spawner: spawner}).Prewarm(ctx, agent.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spareDir := (<-started).Cmd.Dir
+	locked := filepath.Join(spareDir, "locked")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "f"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(locked, 0o700)
+		_ = os.RemoveAll(spareDir)
+	})
+	sess, err := spare.Claim(ctx, agent.Config{Cwd: cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(spareDir); err != nil {
+		t.Fatalf("spare directory before exit: %v", err)
+	}
+	if err := os.Chmod(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(spareDir); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("spare directory left behind after the process exited")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

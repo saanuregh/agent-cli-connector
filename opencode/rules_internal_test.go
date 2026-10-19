@@ -251,7 +251,7 @@ func (m rulesMatrix) run(t *testing.T) (combos, applied int) {
 						for _, tool := range []string{"secret", "lookup"} {
 							host := effects[probe{testHost + "_" + tool, "*"}]
 							switch {
-							case mode == agent.PermissionReadOnly && tool == "secret":
+							case (mode == agent.PermissionPlan || mode == agent.PermissionReadOnly) && tool == "secret":
 								if host != "deny" {
 									t.Errorf("%s: a host tool that is not read-only is %s", name, host)
 								}
@@ -261,19 +261,23 @@ func (m rulesMatrix) run(t *testing.T) (combos, applied int) {
 								t.Errorf("%s: the session's own host tool %s is %s", name, tool, host)
 							}
 						}
-						if mode == agent.PermissionReadOnly {
-							// readOnly denies all but the actions it keeps, which get
-							// the answers acceptEdits gives them.
+						if mode == agent.PermissionPlan || mode == agent.PermissionReadOnly {
+							// plan and readOnly deny all but the actions they keep,
+							// which get the answers acceptEdits gives them. The plan
+							// file is checked below.
 							kept := s.readOnlyActions()
 							edits := s.buildRules(agent.PermissionAcceptEdits, agentName, nil)
 							for _, p := range probes {
+								if mode == agent.PermissionPlan && p.resource == m.planFile {
+									continue
+								}
 								got := m.eval(before, agentName, p.action, p.resource)
 								want := "deny"
 								if slices.Contains(kept, p.action) {
 									want = m.eval(edits, agentName, p.action, p.resource)
 								}
 								if got != want {
-									t.Errorf("%s: readOnly answers %v with %s, want %s", name, p, got, want)
+									t.Errorf("%s: %s answers %v with %s, want %s", name, mode, p, got, want)
 								}
 							}
 						}

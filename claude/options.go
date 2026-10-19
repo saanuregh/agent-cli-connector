@@ -158,8 +158,9 @@ type SessionOptions struct {
 	// MCPViaControl registers agent.Config.MCPServers through the
 	// mcp_set_servers control request before Start returns, instead of
 	// the --mcp-config flag. Servers are always registered that way when
-	// one has Headers or Env, so those values stay out of the command
-	// line, where other local users can read them.
+	// one has Headers, Env, Args, or a URL with credentials or a query
+	// string, so those values stay out of the command line, where other
+	// local users can read them.
 	MCPViaControl bool
 	// ProjectConfigRoot reads project configuration from this checkout
 	// instead of the working directory.

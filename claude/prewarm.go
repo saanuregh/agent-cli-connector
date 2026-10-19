@@ -37,7 +37,9 @@ type Spare struct {
 // and environment. Resume, Fork, ForkAtTurn, and SessionOptions.Continue
 // describe an existing session and are rejected. With an empty Cwd the
 // process waits in a new temporary directory, which is removed once the
-// spare is claimed or closed.
+// spare is claimed or closed. When the claim cannot remove it yet, as on
+// Windows while the process works in it, it is removed once the process
+// exited.
 func (p *Provider) Prewarm(ctx context.Context, cfg agent.Config) (*Spare, error) {
 	opts, err := providerkit.SessionOptions[SessionOptions](Name, cfg.ProviderOptions)
 	if err != nil {
@@ -153,7 +155,11 @@ func (sp *Spare) Claim(ctx context.Context, cfg agent.Config) (*Session, error) 
 		sp.discard()
 		return nil, fmt.Errorf("claude: claim spare: status %s", r.Status)
 	}
-	_ = os.RemoveAll(sp.dir)
+	sp.removeDir(s.current())
+	if err := s.registerMCPServers(ctx, s.cfg, s.opts); err != nil {
+		sp.discard()
+		return nil, err
+	}
 
 	// Record the claimed settings so a restart (Rewind's fallback)
 	// relaunches the same session instead of another spare.
@@ -230,6 +236,20 @@ func (sp *Spare) Close() error {
 func (sp *Spare) discard() {
 	sp.s.shutdown()
 	_ = os.RemoveAll(sp.dir)
+}
+
+// removeDir removes the parking directory of a claimed spare whose process
+// p still runs. Windows refuses to remove a directory that a running
+// process has as its working directory, so a failed removal is retried
+// once p exited.
+func (sp *Spare) removeDir(p *cliProcess) {
+	if sp.dir == "" || os.RemoveAll(sp.dir) == nil || p == nil {
+		return
+	}
+	go func() {
+		<-p.done
+		_ = os.RemoveAll(sp.dir)
+	}()
 }
 
 // claimIgnored names the fields of a Claim config that Prewarm fixed, so

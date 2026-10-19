@@ -143,6 +143,24 @@ func TestMCPServersViaControlAndTimeouts(t *testing.T) {
 	}
 	sess.Close()
 
+	// Args and URLs with credentials or a query string can hold secrets too.
+	for name, srv := range map[string]agent.MCPServer{
+		"args":     {Command: "srv", Args: []string{"--token", "secret"}},
+		"query":    {URL: "https://mcp.example.com/mcp?key=secret"},
+		"userinfo": {URL: "https://user:secret@mcp.example.com/mcp"},
+	} {
+		setReq = nil
+		sess, err := p.StartSession(ctx, agent.Config{MCPServers: map[string]agent.MCPServer{name: srv}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := <-started
+		if strings.Contains(strings.Join(h.Cmd.Args, " "), "secret") || fakeproc.Get(setReq, "request", "servers", name) == nil {
+			t.Errorf("%s: args %v, mcp_set_servers %v", name, h.Cmd.Args, setReq)
+		}
+		sess.Close()
+	}
+
 	// A header moves every server to the control channel without asking.
 	sess, err = p.StartSession(ctx, agent.Config{MCPServers: servers})
 	if err != nil {

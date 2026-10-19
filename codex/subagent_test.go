@@ -180,3 +180,40 @@ func TestSubagentRequestsNameTheSubagent(t *testing.T) {
 		t.Error("StopTask of an unknown task succeeded")
 	}
 }
+
+func TestSubagentFileChangeApprovalCarriesChanges(t *testing.T) {
+	spawner, _ := fakeproc.Spawner(t, func(h *fakeproc.Harness) {
+		if startThread(t, h) == nil {
+			return
+		}
+		ts := h.RecvWhere(fakeproc.Method("turn/start"))
+		h.Reply(ts, map[string]any{"turn": map[string]any{"id": "t1", "status": "inProgress", "items": []any{}}})
+		turnStarted(h, "t1")
+		childNotify(h, "turn/started", map[string]any{"turn": map[string]any{"id": "ct1", "rootTurnId": "t1", "status": "inProgress", "items": []any{}}})
+		childNotify(h, "item/started", map[string]any{"turnId": "ct1", "item": map[string]any{"type": "fileChange", "id": "cf1", "status": "inProgress",
+			"changes": []any{map[string]any{"path": "/w/a.go", "diff": "+x", "kind": map[string]any{"type": "add"}}}}})
+		h.Send(map[string]any{"id": 9, "method": "item/fileChange/requestApproval", "params": map[string]any{
+			"threadId": child, "turnId": "ct1", "itemId": "cf1"}})
+		h.RecvWhere(func(m map[string]any) bool { return fakeproc.Get(m, "id") == float64(9) })
+		turnCompleted(h, "t1", "completed", nil)
+		h.WaitClosed()
+	})
+	ctx := context.Background()
+	var got *agent.PermissionRequest
+	sess, err := codex.New(codex.Options{Spawner: spawner}).StartSession(ctx, agent.Config{Handlers: agent.Handlers{
+		Permission: func(_ context.Context, req *agent.PermissionRequest) agent.PermissionResponse {
+			got = req
+			return agent.PermissionResponse{Decision: agent.DecisionAllow}
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	if _, err := sess.Run(ctx, agent.Text("go")); err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.SubagentID != child || len(got.Changes) != 1 || got.Changes[0].Path != "/w/a.go" || got.Changes[0].Kind != agent.FileAdded {
+		t.Errorf("request = %+v", got)
+	}
+}

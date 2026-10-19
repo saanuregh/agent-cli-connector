@@ -29,7 +29,10 @@
 //     read-only tools, AllowedTools, and MCP ApprovedTools, and refuses
 //     anything else; bypassPermissions runs everything. Without the
 //     bridge, or when the bridge did not load, only an empty mode and
-//     bypassPermissions are accepted.
+//     bypassPermissions are accepted. When a session switch leaves the
+//     bridge unloaded under a gating mode, a Notice with Code
+//     "bridge_unloaded" is sent and Send refuses turns until the bridge
+//     is back or the mode is bypassPermissions.
 //   - An AllowSession answer approves the same bash command, the same
 //     path for edit and write, and the same tool otherwise. Grants end
 //     with NewSession and SwitchSession.

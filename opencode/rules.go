@@ -49,10 +49,10 @@ import (
 //     allow the listed tools) and ApprovedTools (allow), the deny of
 //     other sessions' host tools, this session's host tool allow, and the
 //     asks of host tools with NeedsApproval.
-//  5. Mode denies: plan denies edits, except, for the plan agent, its own
-//     plan paths that no later rule of the agent denies; readOnly denies
-//     every action but those it keeps (readOnlyActions), which keep the
-//     answer the layers above gave them.
+//  5. Mode denies: plan and readOnly deny every action but those they
+//     keep (readOnlyActions), which keep the answer the layers above gave
+//     them. Plan then allows the plan agent its own plan paths that no
+//     later rule of the agent denies.
 //  6. DisallowedTools: denies.
 //  7. SessionOptions.Permissions: the caller's last word.
 //
@@ -63,9 +63,9 @@ import (
 //
 // Layers 3 to 7 outrank agent denies: 3, 4, 6, and 7 are the caller's
 // explicit settings, and 5 only adds denies, the plan agent's own allows,
-// and readOnly's copies of earlier rules. So readOnly also denies the
-// AllowedTools and MCP tools it does not keep; Permissions can still
-// allow them.
+// and the copies of earlier rules that plan and readOnly keep. So plan
+// and readOnly also deny the AllowedTools and MCP tools they do not keep;
+// Permissions can still allow them.
 //
 // AllowSession grants. A grant answers one ask, for one resource. Each
 // time the rules are built, it is placed against the rule that asks for
@@ -231,13 +231,11 @@ func (s *Session) buildRules(mode agent.PermissionMode, agentName string, grants
 	}
 	// 5. Mode denies.
 	switch mode {
-	case agent.PermissionPlan:
-		rules = append(rules, rule("edit", "deny"))
-		if agentName == "plan" {
+	case agent.PermissionPlan, agent.PermissionReadOnly:
+		rules = readOnlyRules(agentRules, rules, s.readOnlyActions())
+		if mode == agent.PermissionPlan && agentName == "plan" {
 			rules = append(rules, planPathRules(agentRules)...)
 		}
-	case agent.PermissionReadOnly:
-		rules = readOnlyRules(agentRules, rules, s.readOnlyActions())
 	}
 	// 6. Disallowed tools.
 	for _, name := range s.cfg.DisallowedTools {
@@ -256,13 +254,15 @@ func (s *Session) buildRules(mode agent.PermissionMode, agentName string, grants
 	return rules
 }
 
-// readOnlyActions are the actions readOnly keeps: the built-in tools that
-// change nothing, shell and external_directory, which keep asking as in
-// acceptEdits, doom_loop, OpenCode's ask about repeated calls, and this
-// session's host tools marked ReadOnly. subagent is kept because its
-// session gets readOnly rules too. Everything else is denied, including
-// edits, webfetch and websearch, MCP and plugin tools, and "execute",
-// which runs the tools OpenCode offers in code mode.
+// readOnlyActions are the actions plan and readOnly keep: the built-in
+// tools that change nothing, shell and external_directory, which keep
+// asking as in acceptEdits, doom_loop, OpenCode's ask about repeated
+// calls, and this session's host tools marked ReadOnly. subagent is kept
+// because its session gets the same mode's rules. Everything else is
+// denied, including edits (but the plan agent's plan paths in plan mode),
+// webfetch and websearch, browser, MCP and plugin tools, and "execute",
+// which runs the tools OpenCode offers in code mode. The plan agent asks
+// about no action of its own beyond these.
 func (s *Session) readOnlyActions() []string {
 	actions := []string{"read", "glob", "grep", "skill", "question", "subagent", "doom_loop", "shell", "external_directory"}
 	if s.host != nil {

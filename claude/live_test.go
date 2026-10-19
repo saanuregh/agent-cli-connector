@@ -6,6 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"slices"
 	"strings"
@@ -16,6 +19,7 @@ import (
 	agent "github.com/saanuregh/agent-cli-connector"
 	"github.com/saanuregh/agent-cli-connector/claude"
 	"github.com/saanuregh/agent-cli-connector/internal/livetest"
+	"github.com/saanuregh/agent-cli-connector/internal/mcpserver"
 )
 
 // These tests run the real claude CLI and spend tokens. Run them with
@@ -443,4 +447,85 @@ func TestLiveCheck(t *testing.T) {
 		t.Fatalf("status = %+v", st)
 	}
 	t.Logf("version %s auth method %q plan %q authenticated %v", st.Version, st.Auth.Method, st.Auth.Plan, st.Auth.Authenticated)
+}
+
+// TestLiveMCPViaControl registers an HTTP MCP server whose URL carries a
+// query string, which keeps it off the command line and sends it with
+// mcp_set_servers, on a started session and on a spare before its claim.
+func TestLiveMCPViaControl(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	tools := mcpserver.New("probe", "1.0.0", []agent.Tool{noopLiveTool("probe_echo")})
+	var keys sync.Map
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		keys.Store(r.URL.Query().Get("key"), true)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		out := tools.Handle(r.Context(), body, "")
+		if out == nil {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(out)
+	}))
+	defer srv.Close()
+	servers := map[string]agent.MCPServer{"probe": {URL: srv.URL + "/mcp?key=live-key"}}
+	opts := &claude.SessionOptions{SettingSources: []string{}, BuiltinTools: []string{}, StrictMCPConfig: true}
+	p := claude.New(claude.Options{})
+
+	connected := func(sess *claude.Session) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			list, err := sess.MCPServerStatus(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, d := range list {
+				if d.Name == "probe" && d.Status == "connected" && len(d.Tools) == 1 && d.Tools[0].Name == "probe_echo" {
+					return
+				}
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("probe server not connected: %+v", list)
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+	sess, _ := start(ctx, t, p, agent.Config{Model: liveModel(), MCPServers: servers, ProviderOptions: opts})
+	connected(sess)
+	sess.Close()
+
+	spare, err := p.Prewarm(ctx, agent.Config{Model: liveModel(), MCPServers: servers, ProviderOptions: opts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spare.Close()
+	cwd := t.TempDir()
+	store := livetest.New(t, p, cwd)
+	claimed, err := spare.Claim(ctx, agent.Config{Cwd: cwd, PermissionMode: agent.PermissionDefault})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Track(claimed)
+	defer claimed.Close()
+	connected(claimed)
+	if _, ok := keys.Load("live-key"); !ok {
+		t.Error("the server never saw the URL's query string")
+	}
+}
+
+func noopLiveTool(name string) agent.Tool {
+	return agent.Tool{Name: name, Description: "Returns ok.", Handler: func(context.Context, agent.ToolCallRequest) (agent.ToolResult, error) {
+		return agent.TextResult("ok"), nil
+	}}
 }

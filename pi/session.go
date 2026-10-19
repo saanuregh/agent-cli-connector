@@ -548,6 +548,13 @@ func (s *Session) Send(ctx context.Context, in agent.Input) (*agent.Turn, error)
 		return nil, fmt.Errorf("pi: Input.ProviderOptions holds %T; pi has no turn options", in.ProviderOptions)
 	}
 	_, _, builtin := s.builtinCommand(in)
+	// A switched-to session may have lost the bridge. Built-in commands
+	// run no tools, so only turns that could run tools ungated are refused.
+	if !builtin {
+		if err := s.checkGate(s.permissionMode()); err != nil {
+			return nil, err
+		}
+	}
 	if len(in.OutputSchema) > 0 {
 		if s.token == "" || s.opts.NoTools {
 			return nil, providerkit.Unsupported(Name, "output schema without the bridge extension or with NoTools")
@@ -1196,6 +1203,12 @@ func (s *Session) checkGate(mode agent.PermissionMode) error {
 		return nil
 	}
 	return fmt.Errorf("pi: the bridge extension did not load, so permission mode %s cannot be enforced", mode)
+}
+
+func (s *Session) permissionMode() agent.PermissionMode {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mode
 }
 
 // SetPermissionMode changes how the bridge gates tool calls.

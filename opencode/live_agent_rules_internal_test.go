@@ -200,12 +200,17 @@ func TestLiveSubagentAgentSwitch(t *testing.T) {
 // from an older parent state are replaced.
 func TestLiveSubagentReportedRules(t *testing.T) {
 	ctx := context.Background()
-	_, s, e := startRules(t, `{"agents":{"helper":{"mode":"subagent"}}}`, agent.PermissionReadOnly)
-	var child nativeSession
-	if err := s.c.data(ctx, "POST", "/api/session", map[string]any{"parentID": s.ID(), "agent": "helper", "permissions": []PermissionRule{rule("*", "allow")}}, &child); err != nil {
-		t.Fatal(err)
+	for _, mode := range []agent.PermissionMode{agent.PermissionPlan, agent.PermissionReadOnly} {
+		t.Run(string(mode), func(t *testing.T) {
+			_, s, e := startRules(t, `{"agents":{"helper":{"mode":"subagent"}}}`, mode)
+			var child nativeSession
+			if err := s.c.data(ctx, "POST", "/api/session", map[string]any{"parentID": s.ID(), "agent": "helper", "permissions": []PermissionRule{rule("*", "allow")}}, &child); err != nil {
+				t.Fatal(err)
+			}
+			eventually(t, s, e, child.ID, "edit", "src/a.go", "deny")
+			eventually(t, s, e, child.ID, "webfetch", "*", "deny")
+		})
 	}
-	eventually(t, s, e, child.ID, "edit", "src/a.go", "deny")
 }
 
 // Subagent sessions created while the mode changes all end with the

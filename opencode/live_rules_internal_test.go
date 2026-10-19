@@ -250,7 +250,7 @@ func TestLiveGlobMatchesOpenCode(t *testing.T) {
 func TestLiveGrantKeepsConfigDenies(t *testing.T) {
 	ctx := context.Background()
 	conf := `{"permissions":[{"action":"edit","resource":"*","effect":"deny"},{"action":"edit","resource":"docs/*","effect":"ask"},{"action":"read","resource":"secrets/*","effect":"deny"}]}`
-	for _, mode := range []agent.PermissionMode{"", agent.PermissionDefault, agent.PermissionReadOnly} {
+	for _, mode := range []agent.PermissionMode{"", agent.PermissionDefault, agent.PermissionPlan, agent.PermissionReadOnly} {
 		t.Run(string(mode), func(t *testing.T) {
 			p := rulesProvider(t, conf)
 			sess, err := p.StartSession(ctx, agent.Config{Cwd: t.TempDir(), PermissionMode: mode})
@@ -265,7 +265,7 @@ func TestLiveGrantKeepsConfigDenies(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				return e.ask(rules, "build", action, res)
+				return e.ask(rules, s.wantAgent(mode), action, res)
 			}
 			// What replyPermission does for AllowSession on a docs/a.md ask and
 			// on a .env read ask, both saving "*".
@@ -279,7 +279,7 @@ func TestLiveGrantKeepsConfigDenies(t *testing.T) {
 				{"edit", "src/main.go"}: "deny", {"read", "secrets/k"}: "deny", {"read", ".env"}: "allow",
 				{"read", "prod.env"}: "ask", {"edit", "docs/a.md"}: "allow", {"edit", "docs/b.md"}: "ask",
 			}
-			if mode == agent.PermissionReadOnly {
+			if mode == agent.PermissionPlan || mode == agent.PermissionReadOnly {
 				want[[2]string{"edit", "docs/a.md"}], want[[2]string{"edit", "docs/b.md"}] = "deny", "deny"
 				// Everything but the kept actions is denied.
 				for _, action := range []string{"webfetch", "websearch", "github_create_issue", "execute", "worktree_create", "session_rename"} {
@@ -362,6 +362,19 @@ func TestLiveSubagentRules(t *testing.T) {
 	if got := childAsk(newChild("general"), "edit", "src/a.go"); got != "deny" {
 		t.Errorf("subagent created under readOnly, edit: %s", got)
 	}
+	if err := s.SetPermissionMode(ctx, agent.PermissionPlan); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{general, newChild("general")} {
+		for _, action := range []string{"edit", "webfetch", "github_create_issue"} {
+			if got := childAsk(id, action, "src/a.go"); got != "deny" {
+				t.Errorf("subagent %s under plan, %s: %s", id, action, got)
+			}
+		}
+		if got := childAsk(id, "read", "src/a.go"); got != "allow" {
+			t.Errorf("subagent %s under plan, read: %s", id, got)
+		}
+	}
 	if err := s.SetPermissionMode(ctx, agent.PermissionBypass); err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +415,7 @@ func TestLiveSubagentRules(t *testing.T) {
 	s.mu.Lock()
 	n := len(s.subagentRules)
 	s.mu.Unlock()
-	if n != 3 {
-		t.Errorf("tracked subagent sessions = %d, want 3", n)
+	if n != 4 {
+		t.Errorf("tracked subagent sessions = %d, want 4", n)
 	}
 }

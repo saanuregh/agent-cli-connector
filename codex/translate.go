@@ -1706,6 +1706,11 @@ func (t *translator) serverRequest(msg *jsonrpc.Message, line []byte) (any, erro
 		_ = json.Unmarshal(msg.Params, &f)
 		s.mu.Lock()
 		item := t.items[f.ItemID]
+		if subagent != "" {
+			if idx := slices.IndexFunc(t.childRunning[subagent], func(it agent.Item) bool { return it.ID == f.ItemID }); idx >= 0 {
+				item = t.childRunning[subagent][idx]
+			}
+		}
 		s.mu.Unlock()
 		req := agent.PermissionRequest{
 			EventMeta:  meta,

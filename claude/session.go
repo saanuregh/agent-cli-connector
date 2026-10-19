@@ -309,8 +309,9 @@ func (s *Session) appliedEffort(ctx context.Context) agent.Effort {
 }
 
 // launch starts a CLI process, makes it the session's process, and runs
-// the initialize handshake. It then registers cfg.MCPServers through
-// mcp_set_servers when mcpViaControl says so.
+// the initialize handshake. Unless the process is a spare, it then
+// registers cfg.MCPServers through mcp_set_servers when mcpViaControl says
+// so.
 //
 // A provisional process does not end the session when it exits; Rewind
 // uses one to try a restart and adopts it once the restart worked.
@@ -377,16 +378,30 @@ func (s *Session) launch(ctx context.Context, cfg agent.Config, opts SessionOpti
 		// already hold the level it applies.
 		init.appliedEffort = s.appliedEffort(startCtx)
 	}
-	if mcpViaControl(cfg, opts) && len(mcpConfig(cfg.MCPServers)) > 0 {
-		res, err := s.SetMCPServers(startCtx, cfg.MCPServers)
-		if err != nil {
-			return nil, fmt.Errorf("claude: register MCP servers: %w", err)
-		}
-		for _, name := range slices.Sorted(maps.Keys(res.Errors)) {
-			s.rt.Emit(&agent.Notice{Level: agent.NoticeWarning, Code: "mcp_server_failed", Message: name + ": " + res.Errors[name]})
+	if !s.spare {
+		if err := s.registerMCPServers(startCtx, cfg, opts); err != nil {
+			return nil, err
 		}
 	}
 	return init, nil
+}
+
+// registerMCPServers registers cfg.MCPServers through mcp_set_servers when
+// mcpViaControl says so, and reports servers the CLI could not add as
+// Notices. A spare refuses the request until it is claimed, so Spare.Claim
+// calls it then.
+func (s *Session) registerMCPServers(ctx context.Context, cfg agent.Config, opts SessionOptions) error {
+	if !mcpViaControl(cfg, opts) || len(mcpConfig(cfg.MCPServers)) == 0 {
+		return nil
+	}
+	res, err := s.SetMCPServers(ctx, cfg.MCPServers)
+	if err != nil {
+		return fmt.Errorf("claude: register MCP servers: %w", err)
+	}
+	for _, name := range slices.Sorted(maps.Keys(res.Errors)) {
+		s.rt.Emit(&agent.Notice{Level: agent.NoticeWarning, Code: "mcp_server_failed", Message: name + ": " + res.Errors[name]})
+	}
+	return nil
 }
 
 // adopt makes a provisional process an ordinary one, so its exit ends the

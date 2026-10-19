@@ -16,7 +16,8 @@ import (
 	"github.com/saanuregh/agent-cli-connector/internal/fakeproc"
 )
 
-// A claimed spare keeps s.spare=true, so a restart rewind relaunches with --await-claim.
+// A rewind restart of a claimed spare relaunches without --await-claim and
+// keeps the settings the spare was prewarmed with.
 func TestClaimedSpareRestartKeepsSettings(t *testing.T) {
 	configDir, cwd := t.TempDir(), t.TempDir()
 	const claimedID = "77777777-2222-4333-8444-555555555555"
