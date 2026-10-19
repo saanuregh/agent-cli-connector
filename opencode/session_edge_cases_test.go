@@ -358,8 +358,16 @@ func TestHelperDirectory(t *testing.T) {
 	}
 	// The default folder under the user cache directory is used, even in
 	// a shared tree: helper servers load no project config from parents.
-	cache := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", cache)
+	// os.UserCacheDir reads XDG_CACHE_HOME on Linux, HOME on macOS, and
+	// LocalAppData on Windows; all point into a temporary folder.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	t.Setenv("LocalAppData", filepath.Join(home, "AppData", "Local"))
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 	p := opencode.New(opencode.Options{Spawner: spawner})
 	_, _ = p.ListModels(context.Background())
 	if want := filepath.Join(cache, "agent-cli-connector", "opencode"); seenDir != want || !helperEnvSet() {

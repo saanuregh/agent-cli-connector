@@ -102,6 +102,7 @@ func TestCacheDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	t.Setenv("LocalAppData", filepath.Join(home, "AppData", "Local"))
 	cache, err := os.UserCacheDir()
 	if err != nil {
 		t.Skip(err)
