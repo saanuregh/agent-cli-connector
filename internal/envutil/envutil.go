@@ -59,3 +59,13 @@ func List(env map[string]string) []string {
 	}
 	return out
 }
+
+// Map converts "KEY=value" entries to a map. Later entries win.
+func Map(env []string) map[string]string {
+	out := make(map[string]string, len(env))
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		out[k] = v
+	}
+	return out
+}

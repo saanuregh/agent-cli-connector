@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -33,6 +34,33 @@ type hostTools struct {
 	cancel context.CancelFunc
 	// sessionID names the session in tool calls.
 	sessionID func() string
+}
+
+// hostToolsURL returns the HostToolsURL to use: the option, or one that
+// applies HostToolsHost, or nil for the listening address itself.
+func (p *Provider) hostToolsURL() func(addr string) string {
+	if p.opts.HostToolsURL != nil || p.opts.HostToolsHost == "" {
+		return p.opts.HostToolsURL
+	}
+	host := p.opts.HostToolsHost
+	return func(addr string) string {
+		u, _ := replaceHost("http://"+addr+"/mcp", host)
+		return u
+	}
+}
+
+// replaceHost replaces the host of rawURL, keeping its port.
+func replaceHost(rawURL, host string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	if port := u.Port(); port != "" {
+		u.Host = net.JoinHostPort(host, port)
+	} else {
+		u.Host = host
+	}
+	return u.String(), nil
 }
 
 func startHostTools(addr string, publicURL func(addr string) string, tools []agent.Tool, sessionID func() string) (*hostTools, error) {

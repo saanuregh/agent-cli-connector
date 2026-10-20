@@ -187,15 +187,16 @@ func (p *Provider) agentDir() string {
 // sessionsDir returns the directory Pi stores cwd's sessions under, in
 // Pi's order of precedence. perCwd reports Pi's default layout, which
 // keeps one subdirectory per working directory; a custom directory holds
-// the sessions of every working directory.
-func (p *Provider) sessionsDir(cwd string) (dir string, perCwd bool) {
+// the sessions of every working directory. Settings files are read from
+// fsys.
+func (p *Provider) sessionsDir(fsys agent.FileSystem, cwd string) (dir string, perCwd bool) {
 	agentDir := p.agentDir()
 	def := filepath.Join(agentDir, "sessions")
 	for _, d := range []string{
 		p.opts.SessionDir,
 		p.env("PI_CODING_AGENT_SESSION_DIR"),
-		settingsSessionDir(filepath.Join(cwd, ".pi", "settings.json")),
-		settingsSessionDir(filepath.Join(agentDir, "settings.json")),
+		settingsSessionDir(fsys, filepath.Join(cwd, ".pi", "settings.json")),
+		settingsSessionDir(fsys, filepath.Join(agentDir, "settings.json")),
 	} {
 		if d == "" {
 			continue
@@ -211,8 +212,8 @@ func (p *Provider) sessionsDir(cwd string) (dir string, perCwd bool) {
 }
 
 // settingsSessionDir reads the sessionDir setting of a Pi settings file.
-func settingsSessionDir(path string) string {
-	data, err := os.ReadFile(path)
+func settingsSessionDir(fsys agent.FileSystem, path string) string {
+	data, err := providerkit.ReadFile(fsys, path)
 	if err != nil {
 		return ""
 	}
@@ -252,10 +253,10 @@ func sameDir(a, b string) bool {
 	return errA == nil && errB == nil && ra == rb
 }
 
-// sessionFiles lists the session files under root, at any depth.
-func sessionFiles(root string) []providerkit.SessionFile {
+// sessionFiles lists the session files under root in fsys, at any depth.
+func sessionFiles(fsys agent.FileSystem, root string) []providerkit.SessionFile {
 	var files []providerkit.SessionFile
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	_ = providerkit.WalkDir(fsys, root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
 			return nil
 		}
@@ -269,14 +270,15 @@ func sessionFiles(root string) []providerkit.SessionFile {
 
 // ListSessions lists persisted sessions, newest first.
 func (p *Provider) ListSessions(ctx context.Context, opts agent.ListSessionsOptions) ([]agent.SessionSummary, error) {
+	fsys := agent.FileSystemOf(p.opts.Spawner)
 	cwd := providerutil.AbsDir(opts.Cwd)
-	root, perCwd := p.sessionsDir(cwd)
+	root, perCwd := p.sessionsDir(fsys, cwd)
 	scan := root
 	if opts.Cwd != "" && perCwd {
 		scan = filepath.Join(root, cwdDirName(cwd))
 	}
-	return providerkit.PageSessionFiles(ctx, sessionFiles(scan), opts.Limit, opts.Offset, func(path string) (agent.SessionSummary, bool) {
-		sum, ok := summarize(path)
+	return providerkit.PageSessionFiles(ctx, sessionFiles(fsys, scan), opts.Limit, opts.Offset, func(path string) (agent.SessionSummary, bool) {
+		sum, ok := summarize(fsys, path)
 		return sum, ok && (opts.Cwd == "" || perCwd || sameDir(sum.Cwd, cwd))
 	})
 }
@@ -305,8 +307,8 @@ func preview(text string) string {
 	return text
 }
 
-func summarize(path string) (agent.SessionSummary, bool) {
-	f, err := os.Open(path)
+func summarize(fsys agent.FileSystem, path string) (agent.SessionSummary, bool) {
+	f, err := fsys.Open(path)
 	if err != nil {
 		return agent.SessionSummary{}, false
 	}
@@ -370,10 +372,10 @@ func summarize(path string) (agent.SessionSummary, bool) {
 	return sum, true
 }
 
-// readBranch reads the active branch of a session file: the chain of
-// entries from the newest entry back to the root, oldest first.
-func readBranch(path string) ([]sessionEntry, error) {
-	data, err := os.ReadFile(path)
+// readBranch reads the active branch of a session file in fsys: the chain
+// of entries from the newest entry back to the root, oldest first.
+func readBranch(fsys agent.FileSystem, path string) ([]sessionEntry, error) {
+	data, err := providerkit.ReadFile(fsys, path)
 	if err != nil {
 		return nil, err
 	}
@@ -420,11 +422,12 @@ func readBranch(path string) ([]sessionEntry, error) {
 // ForkAtTurn accept. With opts.SubagentID, it reads the session file a
 // subagent extension recorded for that task (see ListSubagents).
 func (p *Provider) ReadHistory(ctx context.Context, sessionID string, opts agent.ReadHistoryOptions) ([]agent.Item, error) {
-	path, err := p.findSession(sessionID, opts.Cwd)
+	fsys := agent.FileSystemOf(p.opts.Spawner)
+	path, err := p.findSession(fsys, sessionID, opts.Cwd)
 	if err != nil {
 		return nil, err
 	}
-	chain, err := readBranch(path)
+	chain, err := readBranch(fsys, path)
 	if err != nil {
 		return nil, err
 	}
@@ -437,7 +440,7 @@ func (p *Provider) ReadHistory(ctx context.Context, sessionID string, opts agent
 		if !filepath.IsAbs(file) {
 			file = filepath.Join(filepath.Dir(path), file)
 		}
-		if chain, err = readBranch(file); err != nil {
+		if chain, err = readBranch(fsys, file); err != nil {
 			return nil, err
 		}
 	}
@@ -595,11 +598,12 @@ func branchSubagents(chain []sessionEntry) ([]agent.Task, map[string]string) {
 // through the extension event bus, such as @tintinweb/pi-subagents, are
 // not recorded in the session file.
 func (p *Provider) ListSubagents(ctx context.Context, sessionID string, opts agent.ListSubagentsOptions) ([]agent.Task, error) {
-	path, err := p.findSession(sessionID, opts.Cwd)
+	fsys := agent.FileSystemOf(p.opts.Spawner)
+	path, err := p.findSession(fsys, sessionID, opts.Cwd)
 	if err != nil {
 		return nil, err
 	}
-	chain, err := readBranch(path)
+	chain, err := readBranch(fsys, path)
 	if err != nil {
 		return nil, err
 	}
@@ -609,7 +613,9 @@ func (p *Provider) ListSubagents(ctx context.Context, sessionID string, opts age
 
 // DeleteSession removes a persisted session's file. sessionID may also be
 // a session file path, as for Config.Resume. Session files that subagent
-// extensions recorded for its tasks are kept. It cannot be undone.
+// extensions recorded for its tasks are kept. It cannot be undone. It is
+// unsupported when the Spawner reads files on another machine, since it
+// can only remove files on this one.
 func (p *Provider) DeleteSession(ctx context.Context, sessionID, cwd string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -619,13 +625,17 @@ func (p *Provider) DeleteSession(ctx context.Context, sessionID, cwd string) err
 	if sessionID == "" || !isPath && strings.ContainsAny(sessionID, "*?[") {
 		return fmt.Errorf("pi: invalid session ID %q", sessionID)
 	}
-	path, err := p.findSession(sessionID, cwd)
+	fsys := agent.FileSystemOf(p.opts.Spawner)
+	if fsys != agent.LocalFileSystem {
+		return providerkit.Unsupported(Name, "deleting a session on another machine")
+	}
+	path, err := p.findSession(fsys, sessionID, cwd)
 	if err != nil {
 		return err
 	}
 	// A path ID could name any file; only remove one that starts with a
 	// Pi session header.
-	if !isSessionFile(path) {
+	if !isSessionFile(fsys, path) {
 		return fmt.Errorf("pi: %s is not a Pi session file", path)
 	}
 	if err := os.Remove(path); err != nil {
@@ -634,20 +644,20 @@ func (p *Provider) DeleteSession(ctx context.Context, sessionID, cwd string) err
 	return nil
 }
 
-// isSessionFile reports whether path is a .jsonl file whose first line is
-// a session header.
-func isSessionFile(path string) bool {
+// isSessionFile reports whether path is a .jsonl file in fsys whose first
+// line is a session header.
+func isSessionFile(fsys agent.FileSystem, path string) bool {
 	if filepath.Ext(path) != ".jsonl" {
 		return false
 	}
-	e, ok := readSessionHeader(path)
+	e, ok := readSessionHeader(fsys, path)
 	return ok && e.ID != ""
 }
 
-// readSessionHeader returns the session header on the first line of path;
-// ok is false when the line is not one.
-func readSessionHeader(path string) (e sessionEntry, ok bool) {
-	f, err := os.Open(path)
+// readSessionHeader returns the session header on the first line of path
+// in fsys; ok is false when the line is not one.
+func readSessionHeader(fsys agent.FileSystem, path string) (e sessionEntry, ok bool) {
+	f, err := fsys.Open(path)
 	if err != nil {
 		return sessionEntry{}, false
 	}
@@ -665,15 +675,15 @@ func isSessionPath(id string) bool {
 	return strings.HasSuffix(id, ".jsonl") || strings.ContainsAny(id, `/\`)
 }
 
-// findSession returns the session file for a session ID or path.
-func (p *Provider) findSession(sessionID, cwd string) (string, error) {
+// findSession returns the session file in fsys for a session ID or path.
+func (p *Provider) findSession(fsys agent.FileSystem, sessionID, cwd string) (string, error) {
 	if isSessionPath(sessionID) {
-		if info, err := os.Stat(sessionID); err == nil && !info.IsDir() {
+		if info, err := fsys.Stat(sessionID); err == nil && !info.IsDir() {
 			return sessionID, nil
 		}
 	}
 	abs := providerutil.AbsDir(cwd)
-	root, perCwd := p.sessionsDir(abs)
+	root, perCwd := p.sessionsDir(fsys, abs)
 	// Pi names files "<timestamp>_<id>.jsonl" and IDs may contain "_", so
 	// the name only narrows the search: the header must carry the ID.
 	suffix := "_" + sessionID + ".jsonl"
@@ -681,18 +691,18 @@ func (p *Provider) findSession(sessionID, cwd string) (string, error) {
 		if !strings.HasSuffix(filepath.Base(path), suffix) {
 			return false
 		}
-		e, ok := readSessionHeader(path)
+		e, ok := readSessionHeader(fsys, path)
 		return ok && e.ID == sessionID
 	}
 	if cwd != "" && perCwd {
-		candidates, _ := filepath.Glob(filepath.Join(root, cwdDirName(abs), "*"+suffix))
+		candidates, _ := providerkit.Glob(fsys, filepath.Join(root, cwdDirName(abs), "*"+suffix))
 		for _, path := range candidates {
 			if matches(path) {
 				return path, nil
 			}
 		}
 	}
-	for _, f := range sessionFiles(root) {
+	for _, f := range sessionFiles(fsys, root) {
 		if matches(f.Path) {
 			return f.Path, nil
 		}

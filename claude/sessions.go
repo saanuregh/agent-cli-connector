@@ -71,11 +71,11 @@ func projectDirs(configDir, cwd string) []string {
 }
 
 // latestSessionID returns the most recently modified session of cwd.
-func latestSessionID(configDir, cwd string) (string, error) {
+func latestSessionID(fsys agent.FileSystem, configDir, cwd string) (string, error) {
 	var files []providerkit.SessionFile
 	var err error
 	for _, dir := range projectDirs(configDir, cwd) {
-		if files, err = transcriptFiles(dir); err == nil {
+		if files, err = transcriptFiles(fsys, dir); err == nil {
 			break
 		}
 	}
@@ -87,8 +87,8 @@ func latestSessionID(configDir, cwd string) (string, error) {
 }
 
 // transcriptFiles lists the session transcripts in dir with their mtimes.
-func transcriptFiles(dir string) ([]providerkit.SessionFile, error) {
-	entries, err := os.ReadDir(dir)
+func transcriptFiles(fsys agent.FileSystem, dir string) ([]providerkit.SessionFile, error) {
+	entries, err := fsys.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -127,13 +127,14 @@ func toolResultCount(blocks []contentBlock) int {
 // ListSessions lists persisted sessions, newest first, by reading the
 // transcript files under the Claude config directory.
 func (p *Provider) ListSessions(ctx context.Context, opts agent.ListSessionsOptions) ([]agent.SessionSummary, error) {
+	fsys := p.fileSystem()
 	configDir := p.configDir(agent.Config{})
 	root := filepath.Join(configDir, "projects")
 	var dirs []string
 	if opts.Cwd != "" {
 		dirs = projectDirs(configDir, opts.Cwd)
 	} else {
-		entries, err := os.ReadDir(root)
+		entries, err := fsys.ReadDir(root)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil, nil
@@ -148,10 +149,12 @@ func (p *Provider) ListSessions(ctx context.Context, opts agent.ListSessionsOpti
 	}
 	var files []providerkit.SessionFile
 	for _, dir := range dirs {
-		dirFiles, _ := transcriptFiles(dir)
+		dirFiles, _ := transcriptFiles(fsys, dir)
 		files = append(files, dirFiles...)
 	}
-	return providerkit.PageSessionFiles(ctx, files, opts.Limit, opts.Offset, summarize)
+	return providerkit.PageSessionFiles(ctx, files, opts.Limit, opts.Offset, func(path string) (agent.SessionSummary, bool) {
+		return summarize(fsys, path)
+	})
 }
 
 type transcriptEntry struct {
@@ -178,7 +181,7 @@ type transcriptEntry struct {
 	Message       json.RawMessage `json:"message"`
 }
 
-func summarize(path string) (agent.SessionSummary, bool) {
+func summarize(fsys agent.FileSystem, path string) (agent.SessionSummary, bool) {
 	sum := agent.SessionSummary{
 		ID:       strings.TrimSuffix(filepath.Base(path), ".jsonl"),
 		Provider: Name,
@@ -186,7 +189,7 @@ func summarize(path string) (agent.SessionSummary, bool) {
 	}
 	var firstPrompt, customTitle, aiTitle string
 	hasMessages := false
-	err := eachTranscriptEntry(path, relevantLine, func(e transcriptEntry) error {
+	err := eachTranscriptEntry(fsys, path, relevantLine, func(e transcriptEntry) error {
 		switch e.Type {
 		case "custom-title":
 			customTitle = e.CustomTitle
@@ -279,8 +282,8 @@ func isNotAPIRequestLine(line []byte) bool {
 // eachTranscriptEntry decodes each line of a transcript file that keep
 // accepts and passes it to visit, stopping at the first error visit returns.
 // Lines that do not decode are skipped.
-func eachTranscriptEntry(path string, keep func([]byte) bool, visit func(transcriptEntry) error) error {
-	f, err := os.Open(path)
+func eachTranscriptEntry(fsys agent.FileSystem, path string, keep func([]byte) bool, visit func(transcriptEntry) error) error {
+	f, err := fsys.Open(path)
 	if err != nil {
 		return err
 	}
@@ -401,16 +404,17 @@ func normalizeCommand(text string) string {
 // block index because a streamed block starts before its entry UUID is
 // known.
 func (p *Provider) ReadHistory(ctx context.Context, sessionID string, opts agent.ReadHistoryOptions) ([]agent.Item, error) {
-	path, err := findTranscript(p.configDir(agent.Config{}), sessionID, opts.Cwd)
+	fsys := p.fileSystem()
+	path, err := findTranscript(fsys, p.configDir(agent.Config{}), sessionID, opts.Cwd)
 	if err != nil {
 		return nil, err
 	}
 	if opts.SubagentID != "" {
-		if path, err = findSubagentTranscript(path, opts.SubagentID); err != nil {
+		if path, err = findSubagentTranscript(fsys, path, opts.SubagentID); err != nil {
 			return nil, err
 		}
 	}
-	g, err := readTranscriptGraph(ctx, path)
+	g, err := readTranscriptGraph(ctx, fsys, path)
 	if err != nil {
 		return nil, err
 	}
@@ -454,11 +458,11 @@ func (p *Provider) ReadHistory(ctx context.Context, sessionID string, opts agent
 
 // findSubagentTranscript returns <session>/subagents/[...]/agent-<id>.jsonl
 // next to the session transcript.
-func findSubagentTranscript(sessionPath, agentID string) (string, error) {
+func findSubagentTranscript(fsys agent.FileSystem, sessionPath, agentID string) (string, error) {
 	root := filepath.Join(strings.TrimSuffix(sessionPath, ".jsonl"), "subagents")
 	name := "agent-" + agentID + ".jsonl"
 	var found string
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	_ = providerkit.WalkDir(fsys, root, func(path string, d fs.DirEntry, err error) error {
 		if err == nil && !d.IsDir() && d.Name() == name {
 			found = path
 			return fs.SkipAll
@@ -635,7 +639,7 @@ func (h *historyBuilder) endOrphanedCalls() {
 	}
 }
 
-func findTranscript(configDir, sessionID, cwd string) (string, error) {
+func findTranscript(fsys agent.FileSystem, configDir, sessionID, cwd string) (string, error) {
 	// Session IDs are UUIDs; anything else could name a path or a glob.
 	if !isUUID(sessionID) {
 		return "", fmt.Errorf("claude: session ID %q is not a UUID: %w", sessionID, agent.ErrSessionNotFound)
@@ -645,12 +649,12 @@ func findTranscript(configDir, sessionID, cwd string) (string, error) {
 	if cwd != "" {
 		for _, dir := range projectDirs(configDir, cwd) {
 			path := filepath.Join(dir, name)
-			if _, err := os.Stat(path); err == nil {
+			if _, err := fsys.Stat(path); err == nil {
 				return path, nil
 			}
 		}
 	}
-	matches, _ := filepath.Glob(filepath.Join(root, "*", name))
+	matches, _ := providerkit.Glob(fsys, filepath.Join(root, "*", name))
 	if len(matches) == 0 {
 		return "", fmt.Errorf("claude: session %s: %w", sessionID, agent.ErrSessionNotFound)
 	}
@@ -665,16 +669,17 @@ func (p *Provider) SessionInfo(ctx context.Context, sessionID, cwd string) (*age
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	path, err := findTranscript(p.configDir(agent.Config{}), sessionID, cwd)
+	fsys := p.fileSystem()
+	path, err := findTranscript(fsys, p.configDir(agent.Config{}), sessionID, cwd)
 	if err != nil {
 		return nil, err
 	}
-	sum, ok := summarize(path)
+	sum, ok := summarize(fsys, path)
 	if !ok {
 		return nil, fmt.Errorf("claude: session %s has no messages: %w", sessionID, agent.ErrSessionNotFound)
 	}
 	if sum.UpdatedAt.IsZero() {
-		if info, err := os.Stat(path); err == nil {
+		if info, err := fsys.Stat(path); err == nil {
 			sum.UpdatedAt = info.ModTime()
 		}
 	}
@@ -684,7 +689,8 @@ func (p *Provider) SessionInfo(ctx context.Context, sessionID, cwd string) (*age
 // RenameSession sets a persisted session's title by appending a
 // custom-title entry to its transcript, as the Agent SDK's renameSession
 // does. Use SetTitle for a running session, whose CLI writes the same
-// entry. cwd narrows the search as in SessionInfo.
+// entry. cwd narrows the search as in SessionInfo. It is unsupported when
+// Options.Spawner runs the CLI on another machine.
 func (p *Provider) RenameSession(ctx context.Context, sessionID, cwd, title string) error {
 	if !isUUID(sessionID) {
 		return fmt.Errorf("claude: invalid session ID %q", sessionID)
@@ -696,7 +702,11 @@ func (p *Provider) RenameSession(ctx context.Context, sessionID, cwd, title stri
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	path, err := findTranscript(p.configDir(agent.Config{}), sessionID, cwd)
+	fsys := p.fileSystem()
+	if fsys != agent.LocalFileSystem {
+		return providerkit.Unsupported(Name, "RenameSession with a remote file system")
+	}
+	path, err := findTranscript(fsys, p.configDir(agent.Config{}), sessionID, cwd)
 	if err != nil {
 		return err
 	}
@@ -722,7 +732,8 @@ func (p *Provider) RenameSession(ctx context.Context, sessionID, cwd, title stri
 // DeleteSession removes a persisted session: its transcript and the
 // folder next to it that holds subagent transcripts, as the Agent SDK's
 // deleteSession does. It cannot be undone. cwd narrows the search as in
-// SessionInfo. Do not delete a session a running process still writes.
+// SessionInfo. Do not delete a session a running process still writes. It
+// is unsupported when Options.Spawner runs the CLI on another machine.
 func (p *Provider) DeleteSession(ctx context.Context, sessionID, cwd string) error {
 	if !isUUID(sessionID) {
 		return fmt.Errorf("claude: invalid session ID %q", sessionID)
@@ -730,7 +741,11 @@ func (p *Provider) DeleteSession(ctx context.Context, sessionID, cwd string) err
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	path, err := findTranscript(p.configDir(agent.Config{}), sessionID, cwd)
+	fsys := p.fileSystem()
+	if fsys != agent.LocalFileSystem {
+		return providerkit.Unsupported(Name, "DeleteSession with a remote file system")
+	}
+	path, err := findTranscript(fsys, p.configDir(agent.Config{}), sessionID, cwd)
 	if err != nil {
 		return err
 	}

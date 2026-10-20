@@ -104,7 +104,7 @@ func (s *Session) RewindWithResult(ctx context.Context, turnID string) (*RewindR
 	var historic []string
 	if !s.cfg.Ephemeral {
 		var err error
-		g, err = loadTranscript(ctx, s.provider.configDir(s.cfg), s.ID(), s.cfg.Cwd)
+		g, err = loadTranscript(ctx, s.provider.fileSystem(), s.provider.configDir(s.cfg), s.ID(), s.cfg.Cwd)
 		if err != nil && target == "" {
 			return nil, err
 		}
@@ -300,8 +300,8 @@ func (s *Session) retireProcess() {
 
 // forkPoint returns the --resume-session-at value that keeps a persisted
 // session up to and including turnID.
-func forkPoint(ctx context.Context, configDir, sessionID, cwd, turnID string) (string, error) {
-	g, err := loadTranscript(ctx, configDir, sessionID, cwd)
+func forkPoint(ctx context.Context, fsys agent.FileSystem, configDir, sessionID, cwd, turnID string) (string, error) {
+	g, err := loadTranscript(ctx, fsys, configDir, sessionID, cwd)
 	if err != nil {
 		return "", err
 	}
@@ -316,20 +316,20 @@ type transcriptGraph struct {
 	byID    map[string]int
 }
 
-func loadTranscript(ctx context.Context, configDir, sessionID, cwd string) (*transcriptGraph, error) {
-	path, err := findTranscript(configDir, sessionID, cwd)
+func loadTranscript(ctx context.Context, fsys agent.FileSystem, configDir, sessionID, cwd string) (*transcriptGraph, error) {
+	path, err := findTranscript(fsys, configDir, sessionID, cwd)
 	if err != nil {
 		return nil, err
 	}
-	return readTranscriptGraph(ctx, path)
+	return readTranscriptGraph(ctx, fsys, path)
 }
 
-func readTranscriptGraph(ctx context.Context, path string) (*transcriptGraph, error) {
+func readTranscriptGraph(ctx context.Context, fsys agent.FileSystem, path string) (*transcriptGraph, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	g := &transcriptGraph{byID: map[string]int{}}
-	err := eachTranscriptEntry(path, isNotAPIRequestLine, func(e transcriptEntry) error {
+	err := eachTranscriptEntry(fsys, path, isNotAPIRequestLine, func(e transcriptEntry) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

@@ -23,6 +23,17 @@ type Command struct {
 	UnsetEnv []string
 	// Dir is the working directory. Empty means the spawner's default.
 	Dir string
+	// Files are files the command reads at these paths, such as an
+	// extension the harness loads. They already exist on this machine; a
+	// spawner that runs the command elsewhere must write them at the same
+	// paths first. LocalSpawner ignores them.
+	Files []File
+}
+
+// File is a file a Command needs, with its contents.
+type File struct {
+	Path string
+	Data []byte
 }
 
 // Process is a started harness process.

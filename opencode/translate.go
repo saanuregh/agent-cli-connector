@@ -1492,6 +1492,7 @@ func (s *Session) replyPermission(ctx context.Context, sid, id, action string, s
 	case *PermissionReply:
 		reply = *v
 	default:
+		//exhaustive:enforce
 		switch resp.Decision {
 		case agent.DecisionAllow:
 			reply.Decision = "once"

@@ -625,7 +625,7 @@ func (s *Session) ForkSession(ctx context.Context, cfg agent.Config) (agent.Sess
 		// A turn of this session forks at its latest main assistant
 		// message, once that message has reached the transcript.
 		if c := s.translator().cursor(cfg.ForkAtTurn); c != "" {
-			if g, err := loadTranscript(ctx, s.provider.configDir(s.cfg), s.ID(), s.cfg.Cwd); err == nil {
+			if g, err := loadTranscript(ctx, s.provider.fileSystem(), s.provider.configDir(s.cfg), s.ID(), s.cfg.Cwd); err == nil {
 				if _, ok := g.byID[c]; ok {
 					cfg.ForkAtTurn = c
 				}

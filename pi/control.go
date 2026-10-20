@@ -162,7 +162,7 @@ func (s *Session) applyState(st *State) {
 // followSessionCwd sets Info.Cwd to the directory a session file's header
 // records, which Pi runs the session in; without one Info.Cwd stays.
 func (s *Session) followSessionCwd(file string) {
-	if cwd := sessionFileCwd(file); cwd != "" {
+	if cwd := sessionFileCwd(agent.FileSystemOf(s.provider.opts.Spawner), file); cwd != "" {
 		s.mu.Lock()
 		s.info.Cwd = cwd
 		s.mu.Unlock()
@@ -182,11 +182,11 @@ func (s *Session) loadCommands(ctx context.Context) {
 
 // sessionFileCwd returns the working directory a session file's header
 // records, or "".
-func sessionFileCwd(path string) string {
+func sessionFileCwd(fsys agent.FileSystem, path string) string {
 	if path == "" {
 		return ""
 	}
-	e, _ := readSessionHeader(path)
+	e, _ := readSessionHeader(fsys, path)
 	return e.Cwd
 }
 

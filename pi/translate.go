@@ -5,8 +5,8 @@ import (
 	"cmp"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"maps"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,6 +20,8 @@ import (
 // reader goroutine.
 type translator struct {
 	s *Session
+	// files is the file system of the machine Pi runs on.
+	files agent.FileSystem
 
 	// idPrefix makes the item IDs of assistant messages unique to this
 	// translator, since Pi gives a message no ID until it ended.
@@ -69,6 +71,7 @@ type pendingUser struct {
 func newTranslator(s *Session) *translator {
 	return &translator{
 		s:        s,
+		files:    agent.FileSystemOf(s.provider.opts.Spawner),
 		idPrefix: "msg-" + providerutil.NewUUID()[:8] + "-",
 		subtasks: make(map[string]map[string]agent.Task),
 		blocks:   make(map[int]string),
@@ -263,6 +266,7 @@ func (t *translator) handle(typ string, line []byte) {
 		}
 	case "tool_execution_update":
 		cur := newPartialOutput(ev.PartialResult)
+		cur.files = t.files
 		delta := outputDelta(t.partial[ev.ToolCallID], &cur)
 		t.partial[ev.ToolCallID] = cur
 		if delta != "" {
@@ -531,8 +535,10 @@ type partialOutput struct {
 	open  bool
 	guess int64
 	// fullOutput is the file Pi writes the whole output to once it
-	// truncates, on the machine Pi runs on.
+	// truncates, on the machine Pi runs on, whose file system is files;
+	// nil means this machine's.
 	fullOutput string
+	files      agent.FileSystem
 }
 
 // maxSeen bounds partialOutput.seen; a snapshot is at most Pi's 50 KB byte
@@ -646,7 +652,7 @@ func outputDelta(prev partialOutput, cur *partialOutput) string {
 // finalNewline settles the final newline left open after a gap when the
 // tool ended: from the output Pi's bash tool returns, whose tail is exact;
 // else from the last byte of Pi's full output file, which Pi completes
-// before it reports the end, when this process can read it (an aborted
+// before it reports the end, when p.files can read it (an aborted
 // command returns no output); else by the guess.
 func finalNewline(p partialOutput, result json.RawMessage) bool {
 	var r struct {
@@ -657,17 +663,32 @@ func finalNewline(p partialOutput, result json.RawMessage) bool {
 	if json.Unmarshal(result, &r) == nil && r.StructuredContent != nil && r.StructuredContent.Output != nil {
 		return strings.HasSuffix(*r.StructuredContent.Output, "\n")
 	}
+	files := cmp.Or(p.files, agent.LocalFileSystem)
 	// Only a regular file: opening a named pipe would block.
-	if info, err := os.Lstat(p.fullOutput); p.fullOutput != "" && err == nil && info.Mode().IsRegular() && info.Size() > 0 {
-		if f, err := os.Open(p.fullOutput); err == nil {
+	if info, err := files.Lstat(p.fullOutput); p.fullOutput != "" && err == nil && info.Mode().IsRegular() && info.Size() > 0 {
+		if f, err := files.Open(p.fullOutput); err == nil {
 			defer f.Close()
-			last := make([]byte, 1)
-			if _, err := f.ReadAt(last, info.Size()-1); err == nil {
-				return last[0] == '\n'
+			if last, err := lastByte(f, info.Size()); err == nil {
+				return last == '\n'
 			}
 		}
 	}
 	return p.guess == 1
+}
+
+// lastByte reads the last byte of a file of the given size, at its offset
+// when r supports that and else by reading through.
+func lastByte(r io.Reader, size int64) (byte, error) {
+	last := make([]byte, 1)
+	if ra, ok := r.(io.ReaderAt); ok {
+		_, err := ra.ReadAt(last, size-1)
+		return last[0], err
+	}
+	if _, err := io.CopyN(io.Discard, r, size-1); err != nil {
+		return 0, err
+	}
+	_, err := io.ReadFull(r, last)
+	return last[0], err
 }
 
 // placeSnapshot returns whether the final newline follows cur in the whole

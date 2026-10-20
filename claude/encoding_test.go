@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	agent "github.com/saanuregh/agent-cli-connector"
 )
 
 func TestProjectDirNameMatchesSDK(t *testing.T) {
@@ -71,15 +73,15 @@ func TestFormatWorkflowResult(t *testing.T) {
 	dir := t.TempDir()
 	small := filepath.Join(dir, "out.json")
 	_ = os.WriteFile(small, []byte(`{"result":{"summary":"all good"}}`), 0o644)
-	if got := readWorkflowOutput(small); got != "all good" {
-		t.Errorf("readWorkflowOutput = %q", got)
+	if got := readWorkflowOutputFrom(agent.LocalFileSystem, small); got != "all good" {
+		t.Errorf("readWorkflowOutputFrom = %q", got)
 	}
 	big := filepath.Join(dir, "big.json")
 	_ = os.WriteFile(big, []byte(`{"result":"`+strings.Repeat("x", maxWorkflowOutput)+`"}`), 0o644)
-	if got := readWorkflowOutput(big); got != "" {
+	if got := readWorkflowOutputFrom(agent.LocalFileSystem, big); got != "" {
 		t.Errorf("oversized output read: %d bytes", len(got))
 	}
-	if got := readWorkflowOutput(filepath.Join(dir, "missing")); got != "" {
+	if got := readWorkflowOutputFrom(agent.LocalFileSystem, filepath.Join(dir, "missing")); got != "" {
 		t.Errorf("missing output = %q", got)
 	}
 }

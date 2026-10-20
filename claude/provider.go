@@ -173,6 +173,10 @@ func (p *Provider) configDir(cfg agent.Config) string {
 	return filepath.Join(home, ".claude")
 }
 
+// fileSystem returns the file system of the machine the CLI runs on, which
+// holds its transcripts and other files.
+func (p *Provider) fileSystem() agent.FileSystem { return agent.FileSystemOf(p.opts.Spawner) }
+
 // nativeEffort maps uniform effort levels Claude lacks to the nearest one.
 func nativeEffort(e agent.Effort) agent.Effort {
 	switch e {

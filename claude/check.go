@@ -74,7 +74,7 @@ func (p *Provider) isolatedSession(ctx context.Context, settingSources []string)
 	if err != nil {
 		return nil, nil, err
 	}
-	_, noManagedMCP := os.Stat(managedMCPConfig)
+	_, noManagedMCP := p.fileSystem().Stat(managedMCPConfig)
 	s, err := p.StartSession(ctx, agent.Config{
 		Cwd:       dir,
 		Ephemeral: true,

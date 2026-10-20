@@ -221,14 +221,14 @@ func (p *Provider) startSession(ctx context.Context, cfg agent.Config, opts Sess
 	env := map[string]string{}
 	maps.Copy(env, p.opts.Env)
 	maps.Copy(env, cfg.Env)
-	args, err := s.buildArgs(env)
+	args, files, err := s.buildArgs(env)
 	if err != nil {
 		return nil, err
 	}
 	proc, err := providerkit.StartProcess(ctx, providerkit.ProcessOptions{
 		Provider: Name,
 		Spawner:  p.opts.Spawner,
-		Command:  agent.Command{Path: p.path(), Args: args, Env: providerkit.EnvList(env), UnsetEnv: cfg.UnsetEnv, Dir: cfg.Cwd},
+		Command:  agent.Command{Path: p.path(), Args: args, Env: providerkit.EnvList(env), UnsetEnv: cfg.UnsetEnv, Dir: cfg.Cwd, Files: files},
 		Logger:   s.rt.Logger(),
 		WireTap:  cfg.WireTap,
 	})
@@ -274,9 +274,12 @@ func (p *Provider) startSession(ctx context.Context, cfg agent.Config, opts Sess
 	return s, nil
 }
 
-func (s *Session) buildArgs(env map[string]string) ([]string, error) {
+// buildArgs returns the pi command line and the files it references that a
+// remote spawner must place.
+func (s *Session) buildArgs(env map[string]string) ([]string, []agent.File, error) {
 	cfg, o := s.cfg, s.opts
 	args := []string{"--mode", "rpc"}
+	var files []agent.File
 	// A resumed session keeps its model unless the requested one is
 	// available; applyResumeModel sets it after start.
 	if cfg.Model != "" && cfg.Resume == "" {
@@ -301,7 +304,7 @@ func (s *Session) buildArgs(env map[string]string) ([]string, error) {
 	// directory, which breaks RPC mode; a session file path opens directly.
 	resume := cfg.Resume
 	if resume != "" {
-		if path, err := s.sessionStore(env).findSession(resume, cfg.Cwd); err == nil {
+		if path, err := s.sessionStore(env).findSession(agent.FileSystemOf(s.provider.opts.Spawner), resume, cfg.Cwd); err == nil {
 			resume = path
 		}
 	}
@@ -325,14 +328,15 @@ func (s *Session) buildArgs(env map[string]string) ([]string, error) {
 		if path == "" {
 			p, err := localBridgePath()
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			path = p
+			files = append(files, agent.File{Path: path, Data: bridgeSource})
 		}
 		s.token = "agent-cli-bridge-" + providerutil.NewUUID()
 		bridge, err := json.Marshal(s.bridgeConfig())
 		if err != nil {
-			return nil, fmt.Errorf("pi: encode bridge config: %w", err)
+			return nil, nil, fmt.Errorf("pi: encode bridge config: %w", err)
 		}
 		env["AGENT_CLI_BRIDGE"] = string(bridge)
 		args = append(args, "--extension", path)
@@ -363,7 +367,7 @@ func (s *Session) buildArgs(env map[string]string) ([]string, error) {
 	}
 	if o.NoTools {
 		if len(cfg.Tools) > 0 || len(cfg.MCPServers) > 0 {
-			return nil, errors.New("pi: SessionOptions.NoTools removes Config.Tools and MCP server tools; list the tools in SessionOptions.Tools instead")
+			return nil, nil, errors.New("pi: SessionOptions.NoTools removes Config.Tools and MCP server tools; list the tools in SessionOptions.Tools instead")
 		}
 		args = append(args, "--no-tools")
 	}
@@ -391,7 +395,7 @@ func (s *Session) buildArgs(env map[string]string) ([]string, error) {
 	}
 	args = append(args, s.provider.opts.ExtraArgs...)
 	args = append(args, o.ExtraArgs...)
-	return args, nil
+	return args, files, nil
 }
 
 func (s *Session) bridgeConfig() map[string]any {
@@ -1629,6 +1633,7 @@ func (s *Session) gate(uiID string, req bridgeRequest, meta agent.EventMeta) {
 		if resp.ProviderResponse != nil {
 			return s.bridgeReply(uiID, resp.ProviderResponse)
 		}
+		//exhaustive:enforce
 		switch resp.Decision {
 		case agent.DecisionDeny, agent.DecisionCancel:
 			err := deny(cmp.Or(resp.Message, "The user denied this action."))
@@ -1640,6 +1645,7 @@ func (s *Session) gate(uiID string, req bridgeRequest, meta agent.EventMeta) {
 			s.mu.Lock()
 			s.allowed[grant] = true
 			s.mu.Unlock()
+		case agent.DecisionAllow:
 		}
 		answer := map[string]any{"allow": true}
 		if len(resp.UpdatedInput) > 0 {

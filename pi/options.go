@@ -116,9 +116,10 @@ type Options struct {
 	// 5s.
 	ShutdownGrace time.Duration
 	// BridgePath is where the bridge extension is found by the pi process.
-	// Empty means the library writes it to the user cache directory, which
-	// suits local spawning. Set it when the process runs elsewhere, such as
-	// in a container, and copy bridge.ts (see BridgeSource) there.
+	// Empty means the library writes it to the user cache directory and
+	// lists it in agent.Command.Files, so a Spawner that runs pi elsewhere
+	// can write it at the same path. Set it when bridge.ts (see
+	// BridgeSource) is already in place on the far side.
 	BridgePath string
 	// DisableBridge runs Pi without the bridge extension. Host tools,
 	// permission modes, MCP servers, output schemas, and in-place Rewind

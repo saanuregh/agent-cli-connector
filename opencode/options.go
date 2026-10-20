@@ -190,6 +190,12 @@ type Options struct {
 	// 127.0.0.1, and zero means any free port.
 	Hostname string
 	Port     int
+	// URLHost replaces the host of the URL a private server prints,
+	// keeping its scheme and port, for a Spawner that runs the server
+	// elsewhere: with a container that publishes the server's port, set
+	// Hostname to "0.0.0.0", Port to the published port, and URLHost to
+	// "localhost". MapURL, when set, runs after it.
+	URLHost string
 	// MapURL rewrites the URL a private server prints before it is used,
 	// for spawners that run the server on another machine.
 	MapURL func(url string) (string, error)
@@ -230,9 +236,14 @@ type Options struct {
 	// HostToolsAddr is the address the host tool MCP server listens on.
 	// Empty means 127.0.0.1 on any free port.
 	HostToolsAddr string
+	// HostToolsHost replaces the host in the URL OpenCode uses to reach
+	// the host tools, keeping the port, for a server that runs elsewhere,
+	// such as "host.docker.internal". Set HostToolsAddr so that host can
+	// reach it, such as "0.0.0.0:0". HostToolsURL, when set, wins.
+	HostToolsHost string
 	// HostToolsURL returns the URL OpenCode uses to reach a session's host
 	// tool MCP server, given the address it listens on. Nil means
-	// "http://<address>/mcp".
+	// "http://<address>/mcp", with HostToolsHost applied.
 	HostToolsURL func(addr string) string
 }
 

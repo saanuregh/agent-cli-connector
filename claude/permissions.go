@@ -168,6 +168,7 @@ func permissionResult(d PermissionDetails, resp agent.PermissionResponse) any {
 	if resp.ProviderResponse != nil {
 		return resp.ProviderResponse
 	}
+	//exhaustive:enforce
 	switch resp.Decision {
 	case agent.DecisionAllow, agent.DecisionAllowSession, agent.DecisionAllowAlways:
 		input := d.Input
@@ -187,6 +188,8 @@ func permissionResult(d PermissionDetails, resp agent.PermissionResponse) any {
 			r.DecisionClassification = "user_permanent"
 		}
 		return r
+	case agent.DecisionDeny, agent.DecisionCancel:
+		fallthrough
 	default:
 		msg := resp.Message
 		if msg == "" {

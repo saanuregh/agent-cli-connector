@@ -72,10 +72,11 @@ func (t *translator) stopTail(toolUseID string) {
 // files or symlinks in it, so it is used only when it is a plain directory
 // this user owns; otherwise output is polled over the control channel.
 // Windows has no user IDs (os.Getuid returns -1), so output is always
-// polled there.
+// polled there. So is the output of a CLI on another machine, whose user
+// ID, temp directory, and file ownership this process cannot check.
 func (s *Session) shellOutputRoot() string {
 	uid := os.Getuid()
-	if uid < 0 {
+	if uid < 0 || s.provider.fileSystem() != agent.LocalFileSystem {
 		return ""
 	}
 	root := filepath.Join(s.tempDir(), "claude-"+strconv.Itoa(uid))

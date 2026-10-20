@@ -213,7 +213,7 @@ func (p *Provider) startSession(ctx context.Context, cfg agent.Config, opts Sess
 		return nil, errors.New("claude: SessionID must be a UUID")
 	}
 	if opts.Continue && cfg.Resume == "" {
-		latest, err := latestSessionID(p.configDir(cfg), cfg.Cwd)
+		latest, err := latestSessionID(p.fileSystem(), p.configDir(cfg), cfg.Cwd)
 		if err == nil && latest != "" {
 			cfg.Resume = latest
 		}
@@ -224,7 +224,7 @@ func (p *Provider) startSession(ctx context.Context, cfg agent.Config, opts Sess
 			return nil, errors.New("claude: ForkAtTurn requires Fork and Resume")
 		}
 		if opts.ResumeSessionAt == "" {
-			at, err := forkPoint(ctx, p.configDir(cfg), cfg.Resume, cfg.Cwd, cfg.ForkAtTurn)
+			at, err := forkPoint(ctx, p.fileSystem(), p.configDir(cfg), cfg.Resume, cfg.Cwd, cfg.ForkAtTurn)
 			if err != nil {
 				return nil, err
 			}

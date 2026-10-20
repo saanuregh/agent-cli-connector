@@ -47,6 +47,17 @@ type Writer func(data []byte) error
 type Handler struct {
 	Notify  func(msg *Message, line []byte)
 	Request func(ctx context.Context, msg *Message, line []byte) (any, error)
+	// Schedule, when set, decides when a request runs: Receive calls it on
+	// the read goroutine in arrival order, instead of starting serve on a
+	// new goroutine. It must not block, and must call serve exactly once,
+	// with the context Request receives: ctx or one derived from it.
+	Schedule func(ctx context.Context, msg *Message, serve func(ctx context.Context))
+	// CancelMethod, when set, names the notification the peer sends to
+	// stop one of its requests, such as "$/cancelRequest" with params
+	// {"id": <the request's ID>}: the request's context is cancelled.
+	// Such notifications do not reach Notify. Close cancels every request
+	// still being served.
+	CancelMethod string
 }
 
 // Conn is one side of a JSON-RPC connection.
@@ -54,17 +65,30 @@ type Conn struct {
 	write   Writer
 	handler Handler
 	nextID  atomic.Int64
+	// version is the "jsonrpc" member sent with every message, or empty
+	// to omit it.
+	version string
 
 	mu       sync.Mutex
 	pending  map[string]pendingCall
+	serving  map[string]*context.CancelFunc // by ID; see Handler.CancelMethod
 	closed   bool
 	closeErr error
 }
 
 // New returns a connection that writes with write and dispatches incoming
-// messages to h. Feed incoming lines to Receive.
+// messages to h. Feed incoming lines to Receive. Its messages omit the
+// "jsonrpc" member, which the harnesses do not need.
 func New(write Writer, h Handler) *Conn {
-	return &Conn{write: write, handler: h, pending: make(map[string]pendingCall)}
+	return &Conn{write: write, handler: h, pending: make(map[string]pendingCall), serving: make(map[string]*context.CancelFunc)}
+}
+
+// NewStrict is New for peers that require "jsonrpc":"2.0" on every
+// message, as the JSON-RPC 2.0 specification asks.
+func NewStrict(write Writer, h Handler) *Conn {
+	c := New(write, h)
+	c.version = "2.0"
+	return c
 }
 
 // Call sends a request and decodes the result into result, which may be
@@ -98,6 +122,17 @@ func (c *Conn) CallRaw(ctx context.Context, method string, params any) (json.Raw
 // that reads the reply, before any message read after it is handled. Use
 // it to update state that later messages depend on. reply must not block.
 func (c *Conn) CallOrdered(ctx context.Context, method string, params any, reply func(*Message)) (json.RawMessage, error) {
+	return c.call(ctx, method, params, reply, "")
+}
+
+// CallCancelable is CallRaw that, when ctx ends before the reply, sends
+// the notification cancelMethod with params {"id": <the request's ID>} so
+// the peer can stop working on it.
+func (c *Conn) CallCancelable(ctx context.Context, method string, params any, cancelMethod string) (json.RawMessage, error) {
+	return c.call(ctx, method, params, nil, cancelMethod)
+}
+
+func (c *Conn) call(ctx context.Context, method string, params any, reply func(*Message), cancelMethod string) (json.RawMessage, error) {
 	id := c.nextID.Add(1)
 	key := strconv.FormatInt(id, 10)
 	ch := make(chan *Message, 1)
@@ -115,7 +150,7 @@ func (c *Conn) CallOrdered(ctx context.Context, method string, params any, reply
 		c.mu.Unlock()
 	}()
 
-	data, err := json.Marshal(outgoing{ID: id, Method: method, Params: params})
+	data, err := json.Marshal(outgoing{JSONRPC: c.version, ID: id, Method: method, Params: params})
 	if err != nil {
 		return nil, fmt.Errorf("encode %s: %w", method, err)
 	}
@@ -135,24 +170,28 @@ func (c *Conn) CallOrdered(ctx context.Context, method string, params any, reply
 		}
 		return msg.Result, nil
 	case <-ctx.Done():
+		if cancelMethod != "" {
+			_ = c.Notify(cancelMethod, map[string]int64{"id": id})
+		}
 		return nil, ctx.Err()
 	}
 }
 
 // outgoing is a request, notification, or response. Its fields are in
 // sorted name order, the order encoding/json gave the map it replaced, and a
-// nil interface field is omitted.
+// nil interface field is omitted. JSONRPC comes first, as is customary.
 type outgoing struct {
-	Error  *Error `json:"error,omitempty"`
-	ID     any    `json:"id,omitempty"`
-	Method string `json:"method,omitempty"`
-	Params any    `json:"params,omitempty"`
-	Result any    `json:"result,omitempty"`
+	JSONRPC string `json:"jsonrpc,omitempty"`
+	Error   *Error `json:"error,omitempty"`
+	ID      any    `json:"id,omitempty"`
+	Method  string `json:"method,omitempty"`
+	Params  any    `json:"params,omitempty"`
+	Result  any    `json:"result,omitempty"`
 }
 
 // Notify sends a notification.
 func (c *Conn) Notify(method string, params any) error {
-	data, err := json.Marshal(outgoing{Method: method, Params: params})
+	data, err := json.Marshal(outgoing{JSONRPC: c.version, Method: method, Params: params})
 	if err != nil {
 		return err
 	}
@@ -178,8 +217,21 @@ func (c *Conn) Receive(line []byte) error {
 			call.ch <- &msg
 		}
 	case msg.IsRequest():
-		go c.serve(&msg, line)
+		ctx, done := c.track(msg.ID)
+		serve := func(ctx context.Context) {
+			defer done()
+			c.serve(ctx, &msg, line)
+		}
+		if c.handler.Schedule != nil {
+			c.handler.Schedule(ctx, &msg, serve)
+		} else {
+			go serve(ctx)
+		}
 	case msg.IsNotification():
+		if c.handler.CancelMethod != "" && msg.Method == c.handler.CancelMethod {
+			c.cancelServing(msg.Params)
+			return nil
+		}
 		if c.handler.Notify != nil {
 			c.handler.Notify(&msg, line)
 		}
@@ -187,11 +239,53 @@ func (c *Conn) Receive(line []byte) error {
 	return nil
 }
 
-func (c *Conn) serve(msg *Message, line []byte) {
+// track returns the context for serving request id and the function to
+// call once it is answered. Without a CancelMethod the context never ends.
+func (c *Conn) track(id json.RawMessage) (context.Context, func()) {
+	if c.handler.CancelMethod == "" {
+		return context.Background(), func() {}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	entry := &cancel // tells this request apart if the peer reuses its ID
+	key := idKey(id)
+	c.mu.Lock()
+	if c.closed {
+		cancel()
+	} else {
+		c.serving[key] = entry
+	}
+	c.mu.Unlock()
+	return ctx, func() {
+		c.mu.Lock()
+		if c.serving[key] == entry {
+			delete(c.serving, key)
+		}
+		c.mu.Unlock()
+		cancel()
+	}
+}
+
+// cancelServing cancels the request named by a CancelMethod notification.
+func (c *Conn) cancelServing(params json.RawMessage) {
+	var p struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if json.Unmarshal(params, &p) != nil || len(p.ID) == 0 {
+		return
+	}
+	c.mu.Lock()
+	entry := c.serving[idKey(p.ID)]
+	c.mu.Unlock()
+	if entry != nil {
+		(*entry)()
+	}
+}
+
+func (c *Conn) serve(ctx context.Context, msg *Message, line []byte) {
 	var result any
 	var err error
 	if c.handler.Request != nil {
-		result, err = c.handler.Request(context.Background(), msg, line)
+		result, err = c.handler.Request(ctx, msg, line)
 	} else {
 		err = &Error{Code: -32601, Message: "method not found: " + msg.Method}
 	}
@@ -204,7 +298,7 @@ func (c *Conn) Reply(id json.RawMessage, result any, err error) error {
 	if err == ErrDeferred {
 		return nil
 	}
-	resp := outgoing{ID: id}
+	resp := outgoing{JSONRPC: c.version, ID: id}
 	if err != nil {
 		rpcErr, ok := err.(*Error)
 		if !ok {
@@ -237,6 +331,10 @@ func (c *Conn) Close(err error) {
 	}
 	c.closed = true
 	c.closeErr = err
+	for key, cancel := range c.serving {
+		(*cancel)()
+		delete(c.serving, key)
+	}
 	for key, call := range c.pending {
 		select {
 		case call.ch <- nil:

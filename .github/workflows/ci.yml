@@ -32,6 +32,9 @@ jobs:
       - name: exhaustive
         if: runner.os == 'Linux'
         run: go run github.com/nishanths/exhaustive/cmd/exhaustive@v0.15.0 -e ./...
+      - name: protocol schema
+        if: runner.os == 'Linux'
+        run: go generate ./cmd/agentd && git diff --exit-code cmd/agentd/protocol.schema.json clients/typescript/src/protocol.ts clients/python/agentd/protocol.py
       # The live tests need the real CLIs and accounts, so CI runs the
       # tests against the scripted fake harnesses only.
       - name: test

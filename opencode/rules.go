@@ -178,6 +178,7 @@ func (s *Session) buildRules(mode agent.PermissionMode, agentName string, grants
 	// 1. Base. Every base rule has resource "*" and an action without
 	// wildcards or "*" itself, which keepAgentDenies relies on.
 	var base []PermissionRule
+	//exhaustive:enforce
 	switch mode {
 	case agent.PermissionDefault:
 		base = []PermissionRule{rule("shell", "ask"), rule("edit", "ask"), rule("external_directory", "ask")}
@@ -185,6 +186,8 @@ func (s *Session) buildRules(mode agent.PermissionMode, agentName string, grants
 		base = []PermissionRule{rule("shell", "ask"), rule("external_directory", "ask")}
 	case agent.PermissionBypass:
 		base = []PermissionRule{rule("*", "allow")}
+	case agent.PermissionDontAsk, agent.PermissionAuto:
+		// Refused before this point; OpenCode has no such modes.
 	}
 	var rules []PermissionRule
 	if mode == "" {
@@ -230,12 +233,14 @@ func (s *Session) buildRules(mode agent.PermissionMode, agentName string, grants
 		}
 	}
 	// 5. Mode denies.
+	//exhaustive:enforce
 	switch mode {
 	case agent.PermissionPlan, agent.PermissionReadOnly:
 		rules = readOnlyRules(agentRules, rules, s.readOnlyActions())
 		if mode == agent.PermissionPlan && agentName == "plan" {
 			rules = append(rules, planPathRules(agentRules)...)
 		}
+	case agent.PermissionDefault, agent.PermissionAcceptEdits, agent.PermissionBypass, agent.PermissionDontAsk, agent.PermissionAuto:
 	}
 	// 6. Disallowed tools.
 	for _, name := range s.cfg.DisallowedTools {

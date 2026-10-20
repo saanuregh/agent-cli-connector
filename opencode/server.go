@@ -255,6 +255,13 @@ func (p *Provider) startServer(ctx context.Context, spec serverSpec) (*Server, e
 	case <-ctx.Done():
 		return fail(ctx.Err())
 	}
+	if p.opts.URLHost != "" {
+		mapped, err := replaceHost(raw, p.opts.URLHost)
+		if err != nil {
+			return fail(fmt.Errorf("opencode: URLHost: %w", err))
+		}
+		raw = mapped
+	}
 	if p.opts.MapURL != nil {
 		mapped, err := p.opts.MapURL(raw)
 		if err != nil {

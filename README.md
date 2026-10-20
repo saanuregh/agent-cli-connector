@@ -262,6 +262,73 @@ The uniform API never hides a harness feature:
 - Sessions never block the protocol reader: events queue without limit until read, or up to
   `Config.EventBufferLimit` with an `EventsDropped` marker.
 
+## Other languages: agentd
+
+`cmd/agentd` serves the whole API over JSON-RPC 2.0 on standard input and output, one message per line, so a
+program in any language can run it as a child process. [`cmd/agentd/protocol.schema.json`](cmd/agentd/protocol.schema.json)
+describes every method, notification, callback, event, and provider option; field names are the Go field names.
+
+```sh
+go install github.com/saanuregh/agent-cli-connector/cmd/agentd@latest
+```
+
+Clients for [TypeScript](clients/typescript) (Node 23.6+) and [Python](clients/python) (3.11+) have no
+runtime dependencies, and their protocol types are generated from the same Go types as the schema:
+
+```ts
+const agentd = await Agentd.start({ providers: { claude: {} } });
+const session = await agentd.startSession({ Provider: "claude", Config: { Cwd: "/repo" } });
+const result = await session.run("Add a test for parseConfig");
+```
+
+```jsonc
+→ {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"ProtocolVersion":1,"Providers":{"claude":{}}}}
+→ {"jsonrpc":"2.0","id":2,"method":"session/start","params":{"Provider":"claude","Config":{"Cwd":"/repo"},"Handlers":{"Permission":true}}}
+← {"jsonrpc":"2.0","id":2,"result":{"Session":"s1","Info":{...}}}
+→ {"jsonrpc":"2.0","id":3,"method":"session/send","params":{"Session":"s1","Input":{"Parts":[{"Type":"text","Text":"Add a test"}]}}}
+← {"jsonrpc":"2.0","method":"session/event","params":{"Session":"s1","Seq":4,"Type":"TextDelta","Event":{...}}}
+← {"jsonrpc":"2.0","id":1,"method":"handler/permission","params":{"Session":"s1","Request":{...}}}
+→ {"jsonrpc":"2.0","id":1,"result":{"Decision":"allow"}}
+← {"jsonrpc":"2.0","method":"turn/result","params":{"Session":"s1","TurnID":"...","Result":{...}}}
+```
+
+- **Events and results.** Events arrive as `session/event` notifications, and `turn/result` follows a turn's
+  last event. Native `Raw` messages are left out unless `initialize` sets `IncludeRaw`.
+- **Requests.** Requests named in `Handlers` come to the client as `handler/*` requests. The others arrive as
+  events and are answered with `request/respond`.
+- **Host tools and callbacks.** Tools in `Config.Tools` run through `tool/call` on the client. The Claude and
+  Codex callback options are forwarded as requests too. Each matcher in Claude's `SessionOptions.Hooks`
+  sends `claude/hook`. A hook that gets no answer makes no decision.
+- **Supported methods.** `initialize` lists each provider's `Methods`, and `session/start` lists the
+  session's. Any other optional method fails with `unsupported`.
+- **Cancelling.** Either side sends `$/cancelRequest {"id": ...}` to stop a request it made. agentd sends it
+  when it stops waiting for a callback, such as a permission the harness withdrew. A request the client
+  cancels fails with code -32800.
+- **Where harnesses run.** Put `cmd/agentd-run` on the far side, for example with
+  `GOOS=linux go build ./cmd/agentd-run` and `docker cp` or `scp`, and wrap it:
+  `"Spawner": {"Wrapper": ["ssh", "build-box", "agentd-run"], "Runner": true}` in a provider's `initialize`
+  entry, or `["docker", "exec", "-i", "box", "agentd-run"]`.
+  - **Starting harnesses.** agentd sends the harness command, directory, environment and files (such as
+    Pi's bridge extension) over the runner's standard input, so nothing needs quoting or forwarding.
+  - **Reading session files.** Session lists and history read the far side's files through the runner.
+    agentd builds the paths from its own home directory, so when the far side's differs, name the
+    directory: `CLAUDE_CONFIG_DIR` in Claude's `Options.Env`, or Pi's `SessionDir`. Deleting and
+    renaming sessions there is refused.
+  - **Without the runner.** A plain `Wrapper` gets the command appended, plus `AGENTD_DIR`,
+    `AGENTD_UNSET_ENV`, `AGENTD_ENV` and `AGENTD_FILES` in its environment to apply itself. Session
+    files are then read locally.
+  - **OpenCode's two addresses.** OpenCode runs as a server, so set `Hostname`, `Port` and `URLHost`
+    to reach it, and `HostToolsAddr` and `HostToolsHost` so it can reach the host tools. For example,
+    use `"0.0.0.0"`, a published port, `"localhost"`, `"0.0.0.0:0"` and `"host.docker.internal"`.
+- **Health.** `$/ping` answers at once, even before `initialize`.
+- **Logs.** `agentd -log debug` writes the library's diagnostics to standard error, tagged by session.
+- **Request order.** Requests run concurrently, with two exceptions. Every request sent after `initialize`
+  waits for it. Requests that name the same session run in the order they arrive, except `request/respond`,
+  `request/cancel`, `session/interrupt`, `session/interruptTurn` and `session/close`, which run at once.
+- **Errors.** Every error carries an `ErrorInfo` with a `Kind`, such as `unsupported` or `not_found`, plus the
+  harness's error code or process exit details when there are any.
+- **Shutting down.** Closing standard input, an interrupt, or SIGTERM closes every session and ends agentd.
+
 ## Adding a harness
 
 Implement `agent.Provider` and `agent.Session` on top of `providerkit`: `providerkit.Runtime` handles event
@@ -336,6 +403,11 @@ go test -tags live ./claude ./codex ./pi ./opencode  # real CLIs; spends tokens
 
 Live tests delete the sessions they create (`internal/livetest`), so they leave nothing in the harnesses' session
 stores.
+
+`codex/testdata/app-server.schema.json` is the Codex app-server schema. `TestWireDrift` checks every field the
+codex package reads against it. `go generate ./codex` refreshes it from the installed `codex`, and a weekly
+workflow does the same with the latest release. Every test package also fails when a test leaves goroutines
+running (`internal/leakcheck`).
 
 ## License
 

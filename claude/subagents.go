@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"io"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -16,6 +15,7 @@ import (
 
 	agent "github.com/saanuregh/agent-cli-connector"
 	"github.com/saanuregh/agent-cli-connector/internal/providerutil"
+	"github.com/saanuregh/agent-cli-connector/providerkit"
 )
 
 var _ agent.SubagentLister = (*Provider)(nil)
@@ -28,11 +28,12 @@ var _ agent.SubagentLister = (*Provider)(nil)
 // workflow's run ID as ParentID. Unreadable files are skipped. The files
 // are undocumented CLI internals, so fields can be missing.
 func (p *Provider) ListSubagents(ctx context.Context, sessionID string, opts agent.ListSubagentsOptions) ([]agent.Task, error) {
-	path, err := findTranscript(p.configDir(agent.Config{}), sessionID, opts.Cwd)
+	fsys := p.fileSystem()
+	path, err := findTranscript(fsys, p.configDir(agent.Config{}), sessionID, opts.Cwd)
 	if err != nil {
 		return nil, err
 	}
-	g, err := readTranscriptGraph(ctx, path)
+	g, err := readTranscriptGraph(ctx, fsys, path)
 	if err != nil {
 		return nil, err
 	}
@@ -40,7 +41,7 @@ func (p *Provider) ListSubagents(ctx context.Context, sessionID string, opts age
 	dir := strings.TrimSuffix(path, ".jsonl")
 	var out []agent.Task
 	subRoot := filepath.Join(dir, "subagents")
-	_ = filepath.WalkDir(subRoot, func(file string, d fs.DirEntry, err error) error {
+	_ = providerkit.WalkDir(fsys, subRoot, func(file string, d fs.DirEntry, err error) error {
 		if err != nil || ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -49,7 +50,7 @@ func (p *Provider) ListSubagents(ctx context.Context, sessionID string, opts age
 			return nil
 		}
 		id := strings.TrimSuffix(strings.TrimPrefix(name, "agent-"), ".jsonl")
-		task := subagentTask(file, id, calls)
+		task := subagentTask(fsys, file, id, calls)
 		// Workflow members live in subagents/workflows/<run>/.
 		if rel, err := filepath.Rel(subRoot, file); err == nil {
 			if parts := strings.Split(rel, string(filepath.Separator)); len(parts) >= 3 && parts[0] == "workflows" {
@@ -62,12 +63,12 @@ func (p *Provider) ListSubagents(ctx context.Context, sessionID string, opts age
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	entries, _ := os.ReadDir(filepath.Join(dir, "workflows"))
+	entries, _ := fsys.ReadDir(filepath.Join(dir, "workflows"))
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		if task, ok := workflowTask(filepath.Join(dir, "workflows", e.Name()), calls); ok {
+		if task, ok := workflowTask(fsys, filepath.Join(dir, "workflows", e.Name()), calls); ok {
 			out = append(out, task)
 		}
 	}
@@ -127,7 +128,7 @@ func parentCalls(g *transcriptGraph) parentLinks {
 	return links
 }
 
-func subagentTask(file, id string, links parentLinks) agent.Task {
+func subagentTask(fsys agent.FileSystem, file, id string, links parentLinks) agent.Task {
 	task := agent.Task{ID: id, Kind: agent.TaskSubagent, NativeKind: "local_agent", Status: agent.TaskRunning, Subagent: &agent.Subagent{}}
 	var meta struct {
 		AgentType    string `json:"agentType"`
@@ -136,7 +137,7 @@ func subagentTask(file, id string, links parentLinks) agent.Task {
 		SpawnDepth   int    `json:"spawnDepth"`
 		RequestShape string `json:"requestShape"`
 	}
-	if data, err := os.ReadFile(strings.TrimSuffix(file, ".jsonl") + ".meta.json"); err == nil {
+	if data, err := providerkit.ReadFile(fsys, strings.TrimSuffix(file, ".jsonl")+".meta.json"); err == nil {
 		_ = json.Unmarshal(data, &meta)
 	}
 	task.ToolCallID = meta.ToolUseID
@@ -156,7 +157,7 @@ func subagentTask(file, id string, links parentLinks) agent.Task {
 			}
 		}
 	}
-	readSubagentRun(file, &task)
+	readSubagentRun(fsys, file, &task)
 	return task
 }
 
@@ -164,10 +165,10 @@ func subagentTask(file, id string, links parentLinks) agent.Task {
 // prompt, model, effort, final answer, and the context size of its last
 // request. The final answer is the report of its last SubagentHandback
 // call, as in the live stream, else its last text.
-func readSubagentRun(file string, task *agent.Task) {
+func readSubagentRun(fsys agent.FileSystem, file string, task *agent.Task) {
 	var last, handback string
 	var lastStop string
-	err := eachTranscriptEntry(file, isNotAPIRequestLine, func(e transcriptEntry) error {
+	err := eachTranscriptEntry(fsys, file, isNotAPIRequestLine, func(e transcriptEntry) error {
 		var m struct {
 			Model      string          `json:"model"`
 			StopReason string          `json:"stop_reason"`
@@ -219,8 +220,8 @@ func readSubagentRun(file string, task *agent.Task) {
 	}
 }
 
-func workflowTask(file string, links parentLinks) (agent.Task, bool) {
-	data, err := os.ReadFile(file)
+func workflowTask(fsys agent.FileSystem, file string, links parentLinks) (agent.Task, bool) {
+	data, err := providerkit.ReadFile(fsys, file)
 	if err != nil {
 		return agent.Task{}, false
 	}
@@ -266,10 +267,10 @@ func workflowTask(file string, links parentLinks) (agent.Task, bool) {
 // maxWorkflowOutput caps the workflow output file read for Task.Output.
 const maxWorkflowOutput = 1 << 20
 
-// readWorkflowOutput returns the result in a workflow's output file, or ""
-// when the file is missing, too large, or holds no result.
-func readWorkflowOutput(path string) string {
-	f, err := os.Open(path)
+// readWorkflowOutputFrom returns the result in a workflow's output file in
+// fsys, or "" when the file is missing, too large, or holds no result.
+func readWorkflowOutputFrom(fsys agent.FileSystem, path string) string {
+	f, err := fsys.Open(path)
 	if err != nil {
 		return ""
 	}

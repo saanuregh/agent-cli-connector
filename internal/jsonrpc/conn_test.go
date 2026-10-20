@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -60,11 +61,13 @@ func TestCallRequestAndNotify(t *testing.T) {
 	}
 }
 
-func TestCloseFailsPendingCalls(t *testing.T) {
+func TestCloseFailsPendingCalls(t *testing.T) { synctest.Test(t, testCloseFailsPendingCalls) }
+
+func testCloseFailsPendingCalls(t *testing.T) {
 	c := New(func([]byte) error { return nil }, Handler{})
 	errc := make(chan error, 1)
 	go func() { errc <- c.Call(context.Background(), "never", nil, nil) }()
-	time.Sleep(50 * time.Millisecond)
+	synctest.Wait() // the call is pending
 	boom := errors.New("gone")
 	c.Close(boom)
 	select {
@@ -110,5 +113,78 @@ func TestCallOrderedRunsReplyBeforeLaterMessages(t *testing.T) {
 	}
 	if err := <-done; err == nil {
 		t.Error("CallOrdered returned no error for an error reply")
+	}
+}
+
+func TestCallCancelableNotifiesPeer(t *testing.T) {
+	var mu sync.Mutex
+	var sent []string
+	c := New(func(data []byte) error {
+		mu.Lock()
+		sent = append(sent, string(data))
+		mu.Unlock()
+		return nil
+	}, Handler{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.CallCancelable(ctx, "slow", nil, "$/cancelRequest"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) != 2 || sent[1] != `{"method":"$/cancelRequest","params":{"id":1}}` {
+		t.Errorf("sent %q", sent)
+	}
+}
+
+func TestNewStrictSendsVersion(t *testing.T) {
+	var sent []string
+	c := NewStrict(func(data []byte) error { sent = append(sent, string(data)); return nil }, Handler{})
+	_ = c.Notify("n", nil)
+	_ = c.Reply(json.RawMessage(`1`), nil, nil)
+	if len(sent) != 2 || sent[0] != `{"jsonrpc":"2.0","method":"n"}` || sent[1] != `{"jsonrpc":"2.0","id":1,"result":{}}` {
+		t.Errorf("sent %q", sent)
+	}
+}
+
+func TestScheduleDecidesWhenRequestsRun(t *testing.T) {
+	replies := make(chan string, 2)
+	var queued []func()
+	c := New(func(data []byte) error { replies <- string(data); return nil }, Handler{
+		Request: func(_ context.Context, msg *Message, _ []byte) (any, error) { return msg.Method, nil },
+		Schedule: func(ctx context.Context, _ *Message, serve func(context.Context)) {
+			queued = append(queued, func() { serve(ctx) })
+		},
+	})
+	_ = c.Receive([]byte(`{"id":1,"method":"first"}`))
+	_ = c.Receive([]byte(`{"id":2,"method":"second"}`))
+	if len(queued) != 2 || len(replies) != 0 {
+		t.Fatalf("queued %d, replied %d before serving", len(queued), len(replies))
+	}
+	queued[1]()
+	queued[0]()
+	if a, b := <-replies, <-replies; a != `{"id":2,"result":"second"}` || b != `{"id":1,"result":"first"}` {
+		t.Errorf("replies %s, %s", a, b)
+	}
+}
+
+func TestCancelMethodCancelsServedRequest(t *testing.T) {
+	started := make(chan struct{})
+	replies := make(chan string, 2)
+	c := New(func(data []byte) error { replies <- string(data); return nil }, Handler{
+		CancelMethod: "$/cancelRequest",
+		Request: func(ctx context.Context, msg *Message, _ []byte) (any, error) {
+			close(started)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+		Notify: func(msg *Message, _ []byte) { t.Errorf("cancel reached Notify: %s", msg.Method) },
+	})
+	_ = c.Receive([]byte(`{"id":"r1","method":"slow"}`))
+	<-started
+	// Spacing around the ID does not matter.
+	_ = c.Receive([]byte(`{"method":"$/cancelRequest","params":{"id": "r1"}}`))
+	if got := <-replies; got != `{"error":{"code":-32603,"message":"context canceled"},"id":"r1"}` {
+		t.Errorf("reply %s", got)
 	}
 }

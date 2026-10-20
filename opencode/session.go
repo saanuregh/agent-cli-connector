@@ -23,6 +23,7 @@ import (
 	"time"
 
 	agent "github.com/saanuregh/agent-cli-connector"
+	"github.com/saanuregh/agent-cli-connector/internal/envutil"
 	"github.com/saanuregh/agent-cli-connector/internal/providerutil"
 	"github.com/saanuregh/agent-cli-connector/providerkit"
 )
@@ -345,7 +346,7 @@ func (s *Session) connect(ctx context.Context) error {
 	}
 	s.c = s.srv.client.withTap(s.cfg.WireTap)
 	if len(s.cfg.Tools) > 0 {
-		h, err := startHostTools(p.opts.HostToolsAddr, p.opts.HostToolsURL, s.cfg.Tools, s.ID)
+		h, err := startHostTools(p.opts.HostToolsAddr, p.hostToolsURL(), s.cfg.Tools, s.ID)
 		if err != nil {
 			return fmt.Errorf("opencode: start host tool server: %w", err)
 		}
@@ -584,11 +585,7 @@ func (s *Session) applyEnvironment(ctx context.Context) error {
 	overrides := map[string]string{}
 	maps.Copy(overrides, s.provider.opts.Env)
 	maps.Copy(overrides, cfg.Env)
-	vars := map[string]string{}
-	for _, kv := range providerkit.MergeEnv(providerkit.UnsetEnv(os.Environ(), cfg.UnsetEnv), providerkit.EnvList(overrides)) {
-		k, v, _ := strings.Cut(kv, "=")
-		vars[k] = v
-	}
+	vars := envutil.Map(providerkit.MergeEnv(providerkit.UnsetEnv(os.Environ(), cfg.UnsetEnv), providerkit.EnvList(overrides)))
 	if err := s.c.Call(ctx, "PUT", s.path("/environment"), map[string]any{"variables": vars}, nil); err != nil {
 		return fmt.Errorf("opencode: set session environment: %w", err)
 	}

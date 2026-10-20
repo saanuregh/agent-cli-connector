@@ -1889,7 +1889,7 @@ func (t *translator) task(kind string, line []byte, meta agent.EventMeta) {
 			task.Output = f.Summary
 		}
 		if task.Kind == agent.TaskWorkflow && f.OutputFile != "" {
-			if out := readWorkflowOutput(f.OutputFile); out != "" {
+			if out := readWorkflowOutputFrom(t.s.provider.fileSystem(), f.OutputFile); out != "" {
 				task.Output = out
 			}
 		}

@@ -1,0 +1,5628 @@
+{
+  "$defs": {
+    "AuthTokensRefreshCall": {
+      "properties": {
+        "Params": {},
+        "Provider": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "CancelRequestParams": {
+      "properties": {
+        "id": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "CompactParams": {
+      "properties": {
+        "Instructions": {
+          "type": "string"
+        },
+        "Session": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ControlRequestCall": {
+      "properties": {
+        "Request": {},
+        "Session": {
+          "type": "string"
+        },
+        "Subtype": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "DeleteSessionParams": {
+      "properties": {
+        "Cwd": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "SessionID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ElicitationCall": {
+      "properties": {
+        "Request": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agent.ElicitationRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Session": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ErrorInfo": {
+      "properties": {
+        "Exit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitErrorWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Kind": {
+          "type": "string"
+        },
+        "Message": {
+          "type": "string"
+        },
+        "Protocol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agent.ProtocolError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Turn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnErrorWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "EventNotification": {
+      "properties": {
+        "Event": {},
+        "Seq": {
+          "type": "integer"
+        },
+        "Session": {
+          "type": "string"
+        },
+        "Type": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ExitErrorWire": {
+      "properties": {
+        "Err": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Stderr": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ForkParams": {
+      "properties": {
+        "Session": {
+          "type": "string"
+        },
+        "Start": {
+          "$ref": "#/$defs/StartParams"
+        }
+      },
+      "type": "object"
+    },
+    "HandlerFlags": {
+      "properties": {
+        "Elicitation": {
+          "type": "boolean"
+        },
+        "Permission": {
+          "type": "boolean"
+        },
+        "UserInput": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "HookCall": {
+      "properties": {
+        "Event": {
+          "$ref": "#/$defs/claude.HookEvent"
+        },
+        "Index": {
+          "type": "integer"
+        },
+        "Matcher": {
+          "type": "string"
+        },
+        "Payload": {},
+        "Session": {
+          "type": "string"
+        },
+        "ToolUseID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "InitializeParams": {
+      "properties": {
+        "IncludeRaw": {
+          "type": "boolean"
+        },
+        "ProtocolVersion": {
+          "type": "integer"
+        },
+        "Providers": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/ProviderInit"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "InitializeResult": {
+      "properties": {
+        "ProtocolVersion": {
+          "type": "integer"
+        },
+        "Providers": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ProviderInfo"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ListSessionsParams": {
+      "properties": {
+        "Options": {
+          "$ref": "#/$defs/agent.ListSessionsOptions"
+        },
+        "Provider": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ListSubagentsParams": {
+      "properties": {
+        "Options": {
+          "$ref": "#/$defs/agent.ListSubagentsOptions"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "SessionID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "PendingRequest": {
+      "properties": {
+        "Request": {},
+        "Type": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "PermissionCall": {
+      "properties": {
+        "Request": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agent.PermissionRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Session": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ProviderInfo": {
+      "properties": {
+        "Capabilities": {
+          "$ref": "#/$defs/agent.Capabilities"
+        },
+        "Methods": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Name": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ProviderInit": {
+      "properties": {
+        "OnAuthTokensRefresh": {
+          "type": "boolean"
+        },
+        "Options": {},
+        "Spawner": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpawnerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "WireTap": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ProviderParams": {
+      "properties": {
+        "Provider": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ProviderStatusWire": {
+      "properties": {
+        "Auth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agent.AuthStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Err": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Installed": {
+          "type": "boolean"
+        },
+        "Version": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ReadHistoryParams": {
+      "properties": {
+        "Options": {
+          "$ref": "#/$defs/agent.ReadHistoryOptions"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "SessionID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "RequestParams": {
+      "properties": {
+        "RequestID": {
+          "type": "string"
+        },
+        "Session": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "RespondParams": {
+      "properties": {
+        "Elicitation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agent.ElicitationResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Permission": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agent.PermissionResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "RequestID": {
+          "type": "string"
+        },
+        "Session": {
+          "type": "string"
+        },
+        "UserInput": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agent.UserInputResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SendParams": {
+      "properties": {
+        "Input": {
+          "$ref": "#/$defs/agent.Input"
+        },
+        "ProviderOptions": {},
+        "Session": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SendResult": {
+      "properties": {
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SessionClosedNotification": {
+      "properties": {
+        "Error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Session": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SessionParams": {
+      "properties": {
+        "Session": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SpawnerConfig": {
+      "properties": {
+        "Runner": {
+          "type": "boolean"
+        },
+        "Wrapper": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "StartParams": {
+      "properties": {
+        "Config": {
+          "$ref": "#/$defs/agent.Config"
+        },
+        "Handlers": {
+          "$ref": "#/$defs/HandlerFlags"
+        },
+        "OnControlRequest": {
+          "type": "boolean"
+        },
+        "OnUserDialog": {
+          "type": "boolean"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "ProviderOptions": {},
+        "WireTap": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "StartResult": {
+      "properties": {
+        "Info": {
+          "$ref": "#/$defs/agent.SessionInfo"
+        },
+        "Methods": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Session": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "StopTaskParams": {
+      "properties": {
+        "Session": {
+          "type": "string"
+        },
+        "TaskID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ToolCall": {
+      "properties": {
+        "Call": {
+          "$ref": "#/$defs/agent.ToolCallRequest"
+        },
+        "Session": {
+          "type": "string"
+        },
+        "Tool": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "TurnCompletedWire": {
+      "properties": {
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "Result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnResultWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "TurnErrorWire": {
+      "properties": {
+        "Code": {
+          "type": "string"
+        },
+        "Err": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "HTTPStatus": {
+          "type": "integer"
+        },
+        "Message": {
+          "type": "string"
+        },
+        "ResetsAt": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "Retryable": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "TurnParams": {
+      "properties": {
+        "Session": {
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "TurnResultNotification": {
+      "properties": {
+        "Error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnResultWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Session": {
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "TurnResultWire": {
+      "properties": {
+        "Duration": {
+          "description": "nanoseconds",
+          "type": "integer"
+        },
+        "Err": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Items": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.Item"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Origin": {
+          "type": "string"
+        },
+        "Raw": {},
+        "Status": {
+          "$ref": "#/$defs/agent.TurnStatus"
+        },
+        "Steps": {
+          "type": "integer"
+        },
+        "StopReason": {
+          "type": "string"
+        },
+        "StructuredOutput": {},
+        "Text": {
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        },
+        "Usage": {
+          "$ref": "#/$defs/agent.Usage"
+        }
+      },
+      "type": "object"
+    },
+    "UserDialogCall": {
+      "properties": {
+        "Dialog": {
+          "$ref": "#/$defs/claude.UserDialog"
+        },
+        "Session": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "UserInputCall": {
+      "properties": {
+        "Request": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agent.UserInputRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Session": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ValueParams": {
+      "properties": {
+        "Session": {
+          "type": "string"
+        },
+        "Value": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "WireTapNotification": {
+      "properties": {
+        "Direction": {
+          "type": "string"
+        },
+        "Line": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Session": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.AuthStatus": {
+      "properties": {
+        "Authenticated": {
+          "type": "boolean"
+        },
+        "Email": {
+          "type": "string"
+        },
+        "Method": {
+          "type": "string"
+        },
+        "Plan": {
+          "type": "string"
+        },
+        "Raw": {}
+      },
+      "type": "object"
+    },
+    "agent.Capabilities": {
+      "properties": {
+        "CostReporting": {
+          "type": "boolean"
+        },
+        "Elicitation": {
+          "type": "boolean"
+        },
+        "Fork": {
+          "type": "boolean"
+        },
+        "ForkAtTurn": {
+          "type": "boolean"
+        },
+        "Goals": {
+          "type": "boolean"
+        },
+        "Hooks": {
+          "type": "boolean"
+        },
+        "HostTools": {
+          "type": "boolean"
+        },
+        "Images": {
+          "type": "boolean"
+        },
+        "Interrupt": {
+          "type": "boolean"
+        },
+        "MCPServers": {
+          "type": "boolean"
+        },
+        "OutputSchema": {
+          "type": "boolean"
+        },
+        "PermissionModes": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.PermissionMode"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "PermissionPrompt": {
+          "type": "boolean"
+        },
+        "Plans": {
+          "type": "boolean"
+        },
+        "Queue": {
+          "type": "boolean"
+        },
+        "RateLimits": {
+          "type": "boolean"
+        },
+        "ReasoningStream": {
+          "type": "boolean"
+        },
+        "Resume": {
+          "type": "boolean"
+        },
+        "SetEffort": {
+          "type": "boolean"
+        },
+        "SetModel": {
+          "type": "boolean"
+        },
+        "Steer": {
+          "type": "boolean"
+        },
+        "Streaming": {
+          "type": "boolean"
+        },
+        "Subagents": {
+          "type": "boolean"
+        },
+        "SystemPrompt": {
+          "type": "boolean"
+        },
+        "Tasks": {
+          "type": "boolean"
+        },
+        "UserQuestions": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "agent.Compaction": {
+      "properties": {
+        "Done": {
+          "type": "boolean"
+        },
+        "Error": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Summary": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TokensAfter": {
+          "type": "integer"
+        },
+        "TokensBefore": {
+          "type": "integer"
+        },
+        "Trigger": {
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.Config": {
+      "properties": {
+        "AdditionalDirectories": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "AllowedTools": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "AppendSystemPrompt": {
+          "type": "string"
+        },
+        "Cwd": {
+          "type": "string"
+        },
+        "DisallowedTools": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Effort": {
+          "$ref": "#/$defs/agent.Effort"
+        },
+        "Env": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Ephemeral": {
+          "type": "boolean"
+        },
+        "EventBufferLimit": {
+          "type": "integer"
+        },
+        "Fork": {
+          "type": "boolean"
+        },
+        "ForkAtTurn": {
+          "type": "string"
+        },
+        "Handlers": {
+          "$ref": "#/$defs/agent.Handlers"
+        },
+        "MCPServers": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/agent.MCPServer"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Model": {
+          "type": "string"
+        },
+        "OutputSchema": {},
+        "PermissionMode": {
+          "$ref": "#/$defs/agent.PermissionMode"
+        },
+        "ProviderOptions": {},
+        "Resume": {
+          "type": "string"
+        },
+        "SessionID": {
+          "type": "string"
+        },
+        "Strict": {
+          "type": "boolean"
+        },
+        "SystemPrompt": {
+          "type": "string"
+        },
+        "Title": {
+          "type": "string"
+        },
+        "Tools": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.Tool"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "UnsetEnv": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "agent.ConversationReset": {
+      "properties": {
+        "NewSessionID": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "Trigger": {
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.Delivery": {
+      "examples": [
+        "queue",
+        "steer",
+        "interrupt"
+      ],
+      "type": "string"
+    },
+    "agent.Effort": {
+      "examples": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "type": "string"
+    },
+    "agent.ElicitationAction": {
+      "examples": [
+        "accept",
+        "decline",
+        "cancel"
+      ],
+      "type": "string"
+    },
+    "agent.ElicitationRequest": {
+      "properties": {
+        "Description": {
+          "type": "string"
+        },
+        "ElicitationID": {
+          "type": "string"
+        },
+        "ID": {
+          "type": "string"
+        },
+        "MCPMeta": {},
+        "Message": {
+          "type": "string"
+        },
+        "Mode": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "Schema": {},
+        "Server": {
+          "type": "string"
+        },
+        "SessionID": {
+          "type": "string"
+        },
+        "SubagentID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "Title": {
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        },
+        "URL": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.ElicitationResponse": {
+      "properties": {
+        "Action": {
+          "$ref": "#/$defs/agent.ElicitationAction"
+        },
+        "Content": {},
+        "MCPMeta": {}
+      },
+      "type": "object"
+    },
+    "agent.EventsDropped": {
+      "properties": {
+        "Count": {
+          "type": "integer"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.FileChange": {
+      "properties": {
+        "Diff": {
+          "type": "string"
+        },
+        "Kind": {
+          "$ref": "#/$defs/agent.FileChangeKind"
+        },
+        "MovePath": {
+          "type": "string"
+        },
+        "Path": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.FileChangeKind": {
+      "examples": [
+        "add",
+        "delete",
+        "update"
+      ],
+      "type": "string"
+    },
+    "agent.Goal": {
+      "properties": {
+        "Iterations": {
+          "type": "integer"
+        },
+        "Objective": {
+          "type": "string"
+        },
+        "Status": {
+          "type": "string"
+        },
+        "TimeUsed": {
+          "description": "nanoseconds",
+          "type": "integer"
+        },
+        "TokenBudget": {
+          "type": "integer"
+        },
+        "TokensUsed": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "agent.GoalUpdated": {
+      "properties": {
+        "Goal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agent.Goal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.Handlers": {
+      "properties": {},
+      "type": "object"
+    },
+    "agent.HookOutcome": {
+      "examples": [
+        "succeeded",
+        "failed",
+        "blocked"
+      ],
+      "type": "string"
+    },
+    "agent.HookRun": {
+      "properties": {
+        "Done": {
+          "type": "boolean"
+        },
+        "Event": {
+          "type": "string"
+        },
+        "ID": {
+          "type": "string"
+        },
+        "Name": {
+          "type": "string"
+        },
+        "Outcome": {
+          "$ref": "#/$defs/agent.HookOutcome"
+        },
+        "Output": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Status": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.Image": {
+      "properties": {
+        "Data": {
+          "anyOf": [
+            {
+              "contentEncoding": "base64",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "MediaType": {
+          "type": "string"
+        },
+        "Path": {
+          "type": "string"
+        },
+        "URL": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.Input": {
+      "properties": {
+        "ClientID": {
+          "type": "string"
+        },
+        "Delivery": {
+          "$ref": "#/$defs/agent.Delivery"
+        },
+        "Effort": {
+          "$ref": "#/$defs/agent.Effort"
+        },
+        "Model": {
+          "type": "string"
+        },
+        "OutputSchema": {},
+        "Parts": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.Part"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ProviderOptions": {}
+      },
+      "type": "object"
+    },
+    "agent.Item": {
+      "properties": {
+        "ClientID": {
+          "type": "string"
+        },
+        "ID": {
+          "type": "string"
+        },
+        "Kind": {
+          "$ref": "#/$defs/agent.ItemKind"
+        },
+        "ParentID": {
+          "type": "string"
+        },
+        "Raw": {},
+        "Status": {
+          "$ref": "#/$defs/agent.ItemStatus"
+        },
+        "SubagentID": {
+          "type": "string"
+        },
+        "Synthetic": {
+          "type": "boolean"
+        },
+        "Text": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "Tool": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agent.ToolCall"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.ItemCompleted": {
+      "properties": {
+        "Item": {
+          "$ref": "#/$defs/agent.Item"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.ItemKind": {
+      "examples": [
+        "user_message",
+        "assistant_message",
+        "reasoning",
+        "tool_call",
+        "plan",
+        "compaction",
+        "error",
+        "other"
+      ],
+      "type": "string"
+    },
+    "agent.ItemStarted": {
+      "properties": {
+        "Item": {
+          "$ref": "#/$defs/agent.Item"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.ItemStatus": {
+      "examples": [
+        "in_progress",
+        "completed",
+        "failed",
+        "declined",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "agent.ItemUpdated": {
+      "properties": {
+        "Item": {
+          "$ref": "#/$defs/agent.Item"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.ItemsRemoved": {
+      "properties": {
+        "IDs": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.ListSessionsOptions": {
+      "properties": {
+        "Cwd": {
+          "type": "string"
+        },
+        "Limit": {
+          "type": "integer"
+        },
+        "Offset": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "agent.ListSubagentsOptions": {
+      "properties": {
+        "Cwd": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.MCPServer": {
+      "properties": {
+        "AlwaysLoad": {
+          "type": "boolean"
+        },
+        "ApprovedTools": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Args": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Command": {
+          "type": "string"
+        },
+        "Cwd": {
+          "type": "string"
+        },
+        "Enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "EnabledTools": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Env": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Headers": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "StartupTimeout": {
+          "description": "nanoseconds",
+          "type": "integer"
+        },
+        "ToolTimeout": {
+          "description": "nanoseconds",
+          "type": "integer"
+        },
+        "Transport": {
+          "$ref": "#/$defs/agent.MCPTransport"
+        },
+        "URL": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.MCPServerStatus": {
+      "properties": {
+        "Error": {
+          "type": "string"
+        },
+        "Name": {
+          "type": "string"
+        },
+        "Status": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.MCPTransport": {
+      "examples": [
+        "stdio",
+        "http",
+        "sse"
+      ],
+      "type": "string"
+    },
+    "agent.Model": {
+      "properties": {
+        "ContextWindow": {
+          "type": "integer"
+        },
+        "DefaultEffort": {
+          "$ref": "#/$defs/agent.Effort"
+        },
+        "DefaultServiceTier": {
+          "type": "string"
+        },
+        "Description": {
+          "type": "string"
+        },
+        "DisplayName": {
+          "type": "string"
+        },
+        "Efforts": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.Effort"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ID": {
+          "type": "string"
+        },
+        "InputModalities": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "IsDefault": {
+          "type": "boolean"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "ResolvedID": {
+          "type": "string"
+        },
+        "ServiceTiers": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "agent.Notice": {
+      "properties": {
+        "Code": {
+          "type": "string"
+        },
+        "Level": {
+          "$ref": "#/$defs/agent.NoticeLevel"
+        },
+        "Message": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.NoticeLevel": {
+      "examples": [
+        "info",
+        "warning",
+        "error"
+      ],
+      "type": "string"
+    },
+    "agent.Part": {
+      "properties": {
+        "Data": {
+          "anyOf": [
+            {
+              "contentEncoding": "base64",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "MediaType": {
+          "type": "string"
+        },
+        "Name": {
+          "type": "string"
+        },
+        "Path": {
+          "type": "string"
+        },
+        "Text": {
+          "type": "string"
+        },
+        "Type": {
+          "$ref": "#/$defs/agent.PartType"
+        },
+        "URL": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.PartType": {
+      "examples": [
+        "text",
+        "image",
+        "file",
+        "skill",
+        "mention"
+      ],
+      "type": "string"
+    },
+    "agent.PermissionDecision": {
+      "examples": [
+        "allow",
+        "allow_session",
+        "allow_always",
+        "deny",
+        "cancel"
+      ],
+      "type": "string"
+    },
+    "agent.PermissionKind": {
+      "examples": [
+        "tool",
+        "command",
+        "file_change",
+        "grant",
+        "plan_approval"
+      ],
+      "type": "string"
+    },
+    "agent.PermissionMode": {
+      "examples": [
+        "default",
+        "acceptEdits",
+        "plan",
+        "bypassPermissions",
+        "readOnly",
+        "dontAsk",
+        "auto"
+      ],
+      "type": "string"
+    },
+    "agent.PermissionRequest": {
+      "properties": {
+        "Changes": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.FileChange"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Command": {
+          "type": "string"
+        },
+        "Cwd": {
+          "type": "string"
+        },
+        "Decisions": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.PermissionDecision"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Description": {
+          "type": "string"
+        },
+        "ID": {
+          "type": "string"
+        },
+        "Input": {},
+        "Kind": {
+          "$ref": "#/$defs/agent.PermissionKind"
+        },
+        "Paths": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Plan": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "Reason": {
+          "type": "string"
+        },
+        "SessionID": {
+          "type": "string"
+        },
+        "SubagentID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "Title": {
+          "type": "string"
+        },
+        "ToolCallID": {
+          "type": "string"
+        },
+        "ToolName": {
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.PermissionResponse": {
+      "properties": {
+        "Decision": {
+          "$ref": "#/$defs/agent.PermissionDecision"
+        },
+        "Message": {
+          "type": "string"
+        },
+        "ProviderResponse": {},
+        "UpdatedInput": {}
+      },
+      "type": "object"
+    },
+    "agent.PlanDelta": {
+      "properties": {
+        "Delta": {
+          "type": "string"
+        },
+        "ItemID": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.PlanStep": {
+      "properties": {
+        "ID": {
+          "type": "string"
+        },
+        "Status": {
+          "$ref": "#/$defs/agent.PlanStepStatus"
+        },
+        "Text": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.PlanStepStatus": {
+      "examples": [
+        "pending",
+        "in_progress",
+        "completed"
+      ],
+      "type": "string"
+    },
+    "agent.PlanUpdated": {
+      "properties": {
+        "Explanation": {
+          "type": "string"
+        },
+        "ItemID": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Steps": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.PlanStep"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.ProtocolError": {
+      "properties": {
+        "Code": {
+          "type": "integer"
+        },
+        "Data": {},
+        "ErrorCode": {
+          "type": "string"
+        },
+        "Message": {
+          "type": "string"
+        },
+        "Method": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.Question": {
+      "properties": {
+        "AllowOther": {
+          "type": "boolean"
+        },
+        "Default": {
+          "type": "string"
+        },
+        "Header": {
+          "type": "string"
+        },
+        "ID": {
+          "type": "string"
+        },
+        "MultiSelect": {
+          "type": "boolean"
+        },
+        "Multiline": {
+          "type": "boolean"
+        },
+        "Options": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.QuestionOption"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Placeholder": {
+          "type": "string"
+        },
+        "Secret": {
+          "type": "boolean"
+        },
+        "Text": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.QuestionOption": {
+      "properties": {
+        "Description": {
+          "type": "string"
+        },
+        "Label": {
+          "type": "string"
+        },
+        "Preview": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.RateLimit": {
+      "properties": {
+        "LimitID": {
+          "type": "string"
+        },
+        "Name": {
+          "type": "string"
+        },
+        "Overage": {
+          "type": "boolean"
+        },
+        "ResetsAt": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "Status": {
+          "$ref": "#/$defs/agent.RateLimitStatus"
+        },
+        "UsedPercent": {
+          "type": "number"
+        },
+        "Window": {
+          "description": "nanoseconds",
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "agent.RateLimitStatus": {
+      "examples": [
+        "ok",
+        "warning",
+        "exceeded"
+      ],
+      "type": "string"
+    },
+    "agent.RateLimitUpdated": {
+      "properties": {
+        "Limits": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.RateLimit"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.RawEvent": {
+      "properties": {
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        },
+        "Type": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.ReadHistoryOptions": {
+      "properties": {
+        "Cwd": {
+          "type": "string"
+        },
+        "Limit": {
+          "type": "integer"
+        },
+        "Offset": {
+          "type": "integer"
+        },
+        "SubagentID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.ReasoningDelta": {
+      "properties": {
+        "Delta": {
+          "type": "string"
+        },
+        "ItemID": {
+          "type": "string"
+        },
+        "ParentID": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "SubagentID": {
+          "type": "string"
+        },
+        "Summary": {
+          "type": "boolean"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.RequestOutcome": {
+      "examples": [
+        "",
+        "answered",
+        "withdrawn"
+      ],
+      "type": "string"
+    },
+    "agent.RequestResolved": {
+      "properties": {
+        "Outcome": {
+          "$ref": "#/$defs/agent.RequestOutcome"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "Request": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agent.ElicitationRequest"
+            },
+            {
+              "$ref": "#/$defs/agent.PermissionRequest"
+            },
+            {
+              "$ref": "#/$defs/agent.UserInputRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.Retry": {
+      "properties": {
+        "Attempt": {
+          "type": "integer"
+        },
+        "Code": {
+          "type": "string"
+        },
+        "Delay": {
+          "description": "nanoseconds",
+          "type": "integer"
+        },
+        "Done": {
+          "type": "boolean"
+        },
+        "HTTPStatus": {
+          "type": "integer"
+        },
+        "MaxAttempts": {
+          "type": "integer"
+        },
+        "Message": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.SessionInfo": {
+      "properties": {
+        "Commands": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.SlashCommand"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Cwd": {
+          "type": "string"
+        },
+        "Effort": {
+          "$ref": "#/$defs/agent.Effort"
+        },
+        "ID": {
+          "type": "string"
+        },
+        "MCPServers": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.MCPServerStatus"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Model": {
+          "type": "string"
+        },
+        "PermissionMode": {
+          "$ref": "#/$defs/agent.PermissionMode"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "Title": {
+          "type": "string"
+        },
+        "Tools": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Version": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.SessionStarted": {
+      "properties": {
+        "Info": {
+          "$ref": "#/$defs/agent.SessionInfo"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "Resumed": {
+          "type": "boolean"
+        },
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.SessionStatus": {
+      "examples": [
+        "idle",
+        "running",
+        "compacting",
+        "waiting"
+      ],
+      "type": "string"
+    },
+    "agent.SessionSummary": {
+      "properties": {
+        "CreatedAt": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "Cwd": {
+          "type": "string"
+        },
+        "Effort": {
+          "$ref": "#/$defs/agent.Effort"
+        },
+        "FirstPrompt": {
+          "type": "string"
+        },
+        "ID": {
+          "type": "string"
+        },
+        "LastPrompt": {
+          "type": "string"
+        },
+        "Model": {
+          "type": "string"
+        },
+        "Path": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "Title": {
+          "type": "string"
+        },
+        "UpdatedAt": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.SessionUpdated": {
+      "properties": {
+        "Info": {
+          "$ref": "#/$defs/agent.SessionInfo"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.SlashCommand": {
+      "properties": {
+        "ArgumentHint": {
+          "type": "string"
+        },
+        "Description": {
+          "type": "string"
+        },
+        "Kind": {
+          "type": "string"
+        },
+        "Name": {
+          "type": "string"
+        },
+        "Path": {
+          "type": "string"
+        },
+        "Scope": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.StatusChanged": {
+      "properties": {
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Status": {
+          "$ref": "#/$defs/agent.SessionStatus"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.Subagent": {
+      "properties": {
+        "Background": {
+          "type": "boolean"
+        },
+        "Depth": {
+          "type": "integer"
+        },
+        "Effort": {
+          "$ref": "#/$defs/agent.Effort"
+        },
+        "Model": {
+          "type": "string"
+        },
+        "Name": {
+          "type": "string"
+        },
+        "Prompt": {
+          "type": "string"
+        },
+        "Type": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.Task": {
+      "properties": {
+        "Description": {
+          "type": "string"
+        },
+        "Duration": {
+          "description": "nanoseconds",
+          "type": "integer"
+        },
+        "Error": {
+          "type": "string"
+        },
+        "Hidden": {
+          "type": "boolean"
+        },
+        "ID": {
+          "type": "string"
+        },
+        "Kind": {
+          "$ref": "#/$defs/agent.TaskKind"
+        },
+        "LastTool": {
+          "type": "string"
+        },
+        "NativeKind": {
+          "type": "string"
+        },
+        "Output": {
+          "type": "string"
+        },
+        "ParentID": {
+          "type": "string"
+        },
+        "Status": {
+          "$ref": "#/$defs/agent.TaskStatus"
+        },
+        "Subagent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agent.Subagent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Summary": {
+          "type": "string"
+        },
+        "ToolCallID": {
+          "type": "string"
+        },
+        "ToolUses": {
+          "type": "integer"
+        },
+        "Usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agent.Usage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Workflow": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agent.Workflow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "agent.TaskKind": {
+      "examples": [
+        "subagent",
+        "shell",
+        "workflow",
+        "other"
+      ],
+      "type": "string"
+    },
+    "agent.TaskStatus": {
+      "examples": [
+        "running",
+        "completed",
+        "failed",
+        "stopped"
+      ],
+      "type": "string"
+    },
+    "agent.TaskUpdated": {
+      "properties": {
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Task": {
+          "$ref": "#/$defs/agent.Task"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.TextDelta": {
+      "properties": {
+        "Delta": {
+          "type": "string"
+        },
+        "ItemID": {
+          "type": "string"
+        },
+        "ParentID": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "SubagentID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.Tool": {
+      "properties": {
+        "AlwaysLoad": {
+          "type": "boolean"
+        },
+        "Description": {
+          "type": "string"
+        },
+        "Destructive": {
+          "type": "boolean"
+        },
+        "InputSchema": {},
+        "Name": {
+          "type": "string"
+        },
+        "NeedsApproval": {
+          "type": "boolean"
+        },
+        "OpenWorld": {
+          "type": "boolean"
+        },
+        "ReadOnly": {
+          "type": "boolean"
+        },
+        "SearchHint": {
+          "type": "string"
+        },
+        "Title": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.ToolCall": {
+      "properties": {
+        "Changes": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.FileChange"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Command": {
+          "type": "string"
+        },
+        "Cwd": {
+          "type": "string"
+        },
+        "DisplayName": {
+          "type": "string"
+        },
+        "Duration": {
+          "description": "nanoseconds",
+          "type": "integer"
+        },
+        "ExitCode": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "IconURL": {
+          "type": "string"
+        },
+        "Images": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.Image"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Input": {},
+        "IsError": {
+          "type": "boolean"
+        },
+        "Kind": {
+          "$ref": "#/$defs/agent.ToolKind"
+        },
+        "Name": {
+          "type": "string"
+        },
+        "Output": {
+          "type": "string"
+        },
+        "OutputData": {},
+        "Path": {
+          "type": "string"
+        },
+        "Query": {
+          "type": "string"
+        },
+        "Server": {
+          "type": "string"
+        },
+        "ServerDisplayName": {
+          "type": "string"
+        },
+        "URL": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.ToolCallRequest": {
+      "properties": {
+        "Arguments": {},
+        "ID": {
+          "type": "string"
+        },
+        "Name": {
+          "type": "string"
+        },
+        "SessionID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.ToolContent": {
+      "properties": {
+        "Data": {
+          "anyOf": [
+            {
+              "contentEncoding": "base64",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "MediaType": {
+          "type": "string"
+        },
+        "Text": {
+          "type": "string"
+        },
+        "Type": {
+          "$ref": "#/$defs/agent.ToolContentType"
+        }
+      },
+      "type": "object"
+    },
+    "agent.ToolContentType": {
+      "examples": [
+        "text",
+        "image"
+      ],
+      "type": "string"
+    },
+    "agent.ToolInputDelta": {
+      "properties": {
+        "Delta": {
+          "type": "string"
+        },
+        "ItemID": {
+          "type": "string"
+        },
+        "ParentID": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "SubagentID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.ToolKind": {
+      "examples": [
+        "shell",
+        "read",
+        "edit",
+        "search",
+        "web",
+        "mcp",
+        "subagent",
+        "todo",
+        "question",
+        "plan",
+        "host",
+        "other"
+      ],
+      "type": "string"
+    },
+    "agent.ToolOutputDelta": {
+      "properties": {
+        "Delta": {
+          "type": "string"
+        },
+        "ItemID": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.ToolResult": {
+      "properties": {
+        "Content": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.ToolContent"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "IsError": {
+          "type": "boolean"
+        },
+        "Structured": {}
+      },
+      "type": "object"
+    },
+    "agent.TurnStarted": {
+      "properties": {
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.TurnStatus": {
+      "examples": [
+        "completed",
+        "interrupted",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "agent.Usage": {
+      "properties": {
+        "CacheReadTokens": {
+          "type": "integer"
+        },
+        "CacheWriteTokens": {
+          "type": "integer"
+        },
+        "ContextTokens": {
+          "type": "integer"
+        },
+        "ContextWindow": {
+          "type": "integer"
+        },
+        "CostUSD": {
+          "type": "number"
+        },
+        "InputTokens": {
+          "type": "integer"
+        },
+        "OutputTokens": {
+          "type": "integer"
+        },
+        "ReasoningTokens": {
+          "type": "integer"
+        },
+        "TotalTokens": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "agent.UsageUpdated": {
+      "properties": {
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        },
+        "Usage": {
+          "$ref": "#/$defs/agent.Usage"
+        }
+      },
+      "type": "object"
+    },
+    "agent.UserInputRequest": {
+      "properties": {
+        "Async": {
+          "type": "boolean"
+        },
+        "ID": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Questions": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.Question"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "SubagentID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "Title": {
+          "type": "string"
+        },
+        "ToolCallID": {
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "agent.UserInputResponse": {
+      "properties": {
+        "Answers": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Cancelled": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "agent.Workflow": {
+      "properties": {
+        "Agents": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.WorkflowAgent"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Phases": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.WorkflowPhase"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "agent.WorkflowAgent": {
+      "properties": {
+        "AgentID": {
+          "type": "string"
+        },
+        "Attempt": {
+          "type": "integer"
+        },
+        "Duration": {
+          "description": "nanoseconds",
+          "type": "integer"
+        },
+        "Index": {
+          "type": "integer"
+        },
+        "Label": {
+          "type": "string"
+        },
+        "Model": {
+          "type": "string"
+        },
+        "Phase": {
+          "type": "integer"
+        },
+        "Prompt": {
+          "type": "string"
+        },
+        "Result": {
+          "type": "string"
+        },
+        "State": {
+          "type": "string"
+        },
+        "Tokens": {
+          "type": "integer"
+        },
+        "ToolCalls": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "agent.WorkflowPhase": {
+      "properties": {
+        "Index": {
+          "type": "integer"
+        },
+        "Title": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "claude.AgentDefinition": {
+      "properties": {
+        "autoCompactWindow": {
+          "type": "integer"
+        },
+        "background": {
+          "type": "boolean"
+        },
+        "criticalSystemReminder_EXPERIMENTAL": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "disallowedTools": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effort": {
+          "type": "string"
+        },
+        "initialPrompt": {
+          "type": "string"
+        },
+        "maxTurns": {
+          "type": "integer"
+        },
+        "mcpServers": {
+          "anyOf": [
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memory": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "observer": {
+          "type": "string"
+        },
+        "observerMessage": {
+          "type": "string"
+        },
+        "omitClaudeMd": {
+          "type": "boolean"
+        },
+        "permissionMode": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "skills": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tools": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "claude.BackgroundTask": {
+      "properties": {
+        "ambient": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        },
+        "parent_task_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "subagent_type": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "task_type": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "claude.BackgroundTasksChanged": {
+      "properties": {
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Tasks": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/claude.BackgroundTask"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "claude.CommandLifecycle": {
+      "properties": {
+        "CommandUUID": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "State": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "claude.DeferredToolUse": {
+      "properties": {
+        "Input": {},
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "ToolName": {
+          "type": "string"
+        },
+        "ToolUseID": {
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "claude.HookEvent": {
+      "examples": [
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "PostToolBatch",
+        "Notification",
+        "UserPromptSubmit",
+        "UserPromptExpansion",
+        "SessionStart",
+        "SessionEnd",
+        "Stop",
+        "StopFailure",
+        "SubagentStart",
+        "SubagentStop",
+        "PreCompact",
+        "PostCompact",
+        "PreModelSwitch",
+        "PostModelSwitch",
+        "PermissionRequest",
+        "PermissionDenied",
+        "Setup",
+        "TeammateIdle",
+        "TaskCreated",
+        "TaskCompleted",
+        "Elicitation",
+        "ElicitationResult",
+        "ConfigChange",
+        "WorktreeCreate",
+        "WorktreeRemove",
+        "InstructionsLoaded",
+        "CwdChanged",
+        "FileChanged",
+        "DirectoryAdded",
+        "MessageDisplay"
+      ],
+      "type": "string"
+    },
+    "claude.HookMatcher": {
+      "properties": {
+        "Matcher": {
+          "type": "string"
+        },
+        "Timeout": {
+          "description": "nanoseconds",
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "claude.HookOutput": {
+      "properties": {
+        "async": {
+          "type": "boolean"
+        },
+        "asyncTimeout": {
+          "type": "integer"
+        },
+        "continue": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decision": {
+          "type": "string"
+        },
+        "hookSpecificOutput": {},
+        "reason": {
+          "type": "string"
+        },
+        "stopReason": {
+          "type": "string"
+        },
+        "suppressOutput": {
+          "type": "boolean"
+        },
+        "systemMessage": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "claude.MessageOrigin": {
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "fromMode": {
+          "type": "string"
+        },
+        "fromSession": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "server": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "claude.Options": {
+      "properties": {
+        "ClientApp": {
+          "type": "string"
+        },
+        "Env": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ExtraArgs": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Path": {
+          "type": "string"
+        },
+        "ShutdownGrace": {
+          "description": "nanoseconds",
+          "type": "integer"
+        },
+        "StartupTimeout": {
+          "description": "nanoseconds",
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "claude.Plugin": {
+      "properties": {
+        "Path": {
+          "type": "string"
+        },
+        "SkipMCPDiscovery": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "claude.PromptSuggestion": {
+      "properties": {
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Suggestion": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "claude.SessionOptions": {
+      "properties": {
+        "Agent": {
+          "type": "string"
+        },
+        "AgentProgressSummaries": {
+          "type": "boolean"
+        },
+        "Agents": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/claude.AgentDefinition"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "AllowBypassPermissions": {
+          "type": "boolean"
+        },
+        "AppendSubagentSystemPrompt": {
+          "type": "string"
+        },
+        "Betas": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "BuiltinTools": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Continue": {
+          "type": "boolean"
+        },
+        "Debug": {
+          "type": "boolean"
+        },
+        "DebugFile": {
+          "type": "string"
+        },
+        "EnableFileCheckpointing": {
+          "type": "boolean"
+        },
+        "ExcludeDynamicSections": {
+          "type": "boolean"
+        },
+        "ExtraArgs": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "FallbackModel": {
+          "type": "string"
+        },
+        "HideSubagentText": {
+          "type": "boolean"
+        },
+        "Hooks": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "$ref": "#/$defs/claude.HookMatcher"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "IncludeHookEvents": {
+          "type": "boolean"
+        },
+        "InitializeExtra": {
+          "anyOf": [
+            {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "MCPViaControl": {
+          "type": "boolean"
+        },
+        "ManagedSettings": {},
+        "MaxBudgetUSD": {
+          "type": "number"
+        },
+        "MaxTurns": {
+          "type": "integer"
+        },
+        "NoPartialMessages": {
+          "type": "boolean"
+        },
+        "NoPerTaskStopAffordance": {
+          "type": "boolean"
+        },
+        "NoPermissionPrompts": {
+          "type": "boolean"
+        },
+        "PermissionPromptTool": {
+          "type": "string"
+        },
+        "PlanModeInstructions": {
+          "type": "string"
+        },
+        "Plugins": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/claude.Plugin"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ProjectConfigRoot": {
+          "type": "string"
+        },
+        "PromptSuggestions": {
+          "type": "boolean"
+        },
+        "ResumeDropsTurn": {
+          "type": "string"
+        },
+        "ResumeSessionAt": {
+          "type": "string"
+        },
+        "Sandbox": {
+          "anyOf": [
+            {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "SettingSources": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Settings": {},
+        "Skills": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "StrictMCPConfig": {
+          "type": "boolean"
+        },
+        "SupportedDialogKinds": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "SystemPromptBlocks": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "SystemPromptSnapshot": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "TailShellOutput": {
+          "type": "boolean"
+        },
+        "TaskBudgetTokens": {
+          "type": "integer"
+        },
+        "Thinking": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/claude.Thinking"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ToolAliases": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ToolConfig": {
+          "anyOf": [
+            {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ToolServerName": {
+          "type": "string"
+        },
+        "ToolTimeout": {
+          "description": "nanoseconds",
+          "type": "integer"
+        },
+        "TrackSubagentEffort": {
+          "type": "boolean"
+        },
+        "VerbatimPrompts": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "claude.Thinking": {
+      "properties": {
+        "BudgetTokens": {
+          "type": "integer"
+        },
+        "Display": {
+          "type": "string"
+        },
+        "Type": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "claude.ToolProgress": {
+      "properties": {
+        "Elapsed": {
+          "description": "nanoseconds",
+          "type": "integer"
+        },
+        "ParentToolUseID": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "TaskID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "ToolName": {
+          "type": "string"
+        },
+        "ToolUseID": {
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "claude.ToolUseSummary": {
+      "properties": {
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Summary": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "ToolUseIDs": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "claude.TurnOptions": {
+      "properties": {
+        "Extra": {
+          "anyOf": [
+            {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "NoQuery": {
+          "type": "boolean"
+        },
+        "Origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/claude.MessageOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "PastedContent": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Priority": {
+          "type": "string"
+        },
+        "Verbatim": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "claude.UserDialog": {
+      "properties": {
+        "Kind": {
+          "type": "string"
+        },
+        "Payload": {},
+        "RequestID": {
+          "type": "string"
+        },
+        "ToolUseID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "codex.CollaborationMode": {
+      "properties": {
+        "mode": {
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/$defs/codex.CollaborationModeSettings"
+        }
+      },
+      "type": "object"
+    },
+    "codex.CollaborationModeSettings": {
+      "properties": {
+        "developer_instructions": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "codex.DiffUpdated": {
+      "properties": {
+        "Diff": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "codex.Options": {
+      "properties": {
+        "ClientName": {
+          "type": "string"
+        },
+        "ClientTitle": {
+          "type": "string"
+        },
+        "ClientVersion": {
+          "type": "string"
+        },
+        "Config": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Disable": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "DisableExperimentalAPI": {
+          "type": "boolean"
+        },
+        "Enable": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Env": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ExtraArgs": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "InitializeCapabilities": {
+          "anyOf": [
+            {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "OptOutNotifications": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Path": {
+          "type": "string"
+        },
+        "SharedServer": {
+          "type": "boolean"
+        },
+        "ShutdownGrace": {
+          "description": "nanoseconds",
+          "type": "integer"
+        },
+        "StartupTimeout": {
+          "description": "nanoseconds",
+          "type": "integer"
+        },
+        "UnsetEnv": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "codex.OtherRateLimitUpdated": {
+      "properties": {
+        "LimitID": {
+          "type": "string"
+        },
+        "LimitName": {
+          "type": "string"
+        },
+        "Limits": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/agent.RateLimit"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "codex.SessionOptions": {
+      "properties": {
+        "ApprovalPolicy": {},
+        "ApprovalsReviewer": {
+          "type": "string"
+        },
+        "Config": {
+          "anyOf": [
+            {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "DisableContextRestore": {
+          "type": "boolean"
+        },
+        "DisableStrictOutputSchema": {
+          "type": "boolean"
+        },
+        "ExtraThreadParams": {
+          "anyOf": [
+            {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ExtraTurnParams": {
+          "anyOf": [
+            {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "HistoryMode": {
+          "type": "string"
+        },
+        "ModelProvider": {
+          "type": "string"
+        },
+        "Permissions": {
+          "type": "string"
+        },
+        "Personality": {
+          "type": "string"
+        },
+        "ReasoningSummary": {
+          "type": "string"
+        },
+        "Sandbox": {
+          "type": "string"
+        },
+        "ServiceName": {
+          "type": "string"
+        },
+        "ServiceTier": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "codex.TerminalInteraction": {
+      "properties": {
+        "ItemID": {
+          "type": "string"
+        },
+        "ProcessID": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Stdin": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "codex.TurnOptions": {
+      "properties": {
+        "AdditionalContext": {
+          "anyOf": [
+            {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ApprovalPolicy": {},
+        "ApprovalsReviewer": {
+          "type": "string"
+        },
+        "CollaborationMode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/codex.CollaborationMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Cwd": {
+          "type": "string"
+        },
+        "Extra": {
+          "anyOf": [
+            {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ReasoningSummary": {
+          "type": "string"
+        },
+        "SandboxPolicy": {},
+        "ServiceTier": {
+          "type": "string"
+        },
+        "StickyServiceTier": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "opencode.Options": {
+      "properties": {
+        "AllowHostToolsOnAttachedServer": {
+          "type": "boolean"
+        },
+        "Env": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ExtraArgs": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "HelperDir": {
+          "type": "string"
+        },
+        "HostToolsAddr": {
+          "type": "string"
+        },
+        "HostToolsHost": {
+          "type": "string"
+        },
+        "Hostname": {
+          "type": "string"
+        },
+        "Password": {
+          "type": "string"
+        },
+        "Path": {
+          "type": "string"
+        },
+        "Port": {
+          "type": "integer"
+        },
+        "ServerURL": {
+          "type": "string"
+        },
+        "SharedServer": {
+          "type": "boolean"
+        },
+        "ShutdownGrace": {
+          "description": "nanoseconds",
+          "type": "integer"
+        },
+        "StartupTimeout": {
+          "description": "nanoseconds",
+          "type": "integer"
+        },
+        "URLHost": {
+          "type": "string"
+        },
+        "Username": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "opencode.PermissionRule": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "effect": {
+          "type": "string"
+        },
+        "resource": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "opencode.SessionOptions": {
+      "properties": {
+        "Agent": {
+          "type": "string"
+        },
+        "Config": {
+          "anyOf": [
+            {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Instructions": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Metadata": {
+          "anyOf": [
+            {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Permissions": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/opencode.PermissionRule"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "opencode.TurnOptions": {
+      "properties": {
+        "Agents": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Metadata": {
+          "anyOf": [
+            {
+              "additionalProperties": {},
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "pi.EntryAppended": {
+      "properties": {
+        "Entry": {},
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "pi.ExtensionError": {
+      "properties": {
+        "Error": {
+          "type": "string"
+        },
+        "Event": {
+          "type": "string"
+        },
+        "ExtensionPath": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "pi.Options": {
+      "properties": {
+        "BridgePath": {
+          "type": "string"
+        },
+        "DisableBridge": {
+          "type": "boolean"
+        },
+        "Env": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ExtraArgs": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Path": {
+          "type": "string"
+        },
+        "SessionDir": {
+          "type": "string"
+        },
+        "ShutdownGrace": {
+          "description": "nanoseconds",
+          "type": "integer"
+        },
+        "StartupTimeout": {
+          "description": "nanoseconds",
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "pi.QueueUpdated": {
+      "properties": {
+        "FollowUp": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Steering": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "pi.SessionOptions": {
+      "properties": {
+        "AutoCompaction": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "AutoRetry": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "DisableBridge": {
+          "type": "boolean"
+        },
+        "Extensions": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ExtraArgs": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "FollowUpMode": {
+          "type": "string"
+        },
+        "Models": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "NoBuiltinTools": {
+          "type": "boolean"
+        },
+        "NoContextFiles": {
+          "type": "boolean"
+        },
+        "NoExtensions": {
+          "type": "boolean"
+        },
+        "NoMCP": {
+          "type": "boolean"
+        },
+        "NoPromptTemplates": {
+          "type": "boolean"
+        },
+        "NoSkills": {
+          "type": "boolean"
+        },
+        "NoTools": {
+          "type": "boolean"
+        },
+        "Offline": {
+          "type": "boolean"
+        },
+        "PromptTemplates": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "SessionDir": {
+          "type": "string"
+        },
+        "Skills": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "SteeringMode": {
+          "type": "string"
+        },
+        "Tools": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "TrustProject": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "pi.UIUpdate": {
+      "properties": {
+        "Fields": {},
+        "Method": {
+          "type": "string"
+        },
+        "Provider": {
+          "type": "string"
+        },
+        "Raw": {},
+        "SessionID": {
+          "type": "string"
+        },
+        "Time": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "TurnID": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "clientNotifications": {
+    "$/cancelRequest": {
+      "direction": "client to agentd",
+      "params": {
+        "$ref": "#/$defs/CancelRequestParams"
+      }
+    }
+  },
+  "description": "JSON-RPC 2.0, one message per line; every message agentd writes has \"jsonrpc\":\"2.0\". Property names are Go field names. All properties are optional on input; on output every property is present unless its type marks it omitempty in Go, and nil pointers, slices, and maps are null. Raw properties carrying native messages are removed unless initialize set IncludeRaw. Methods without a result reply with an empty object. Requests run concurrently, except that requests after initialize wait for it and requests naming the same session run in arrival order, apart from request/respond, request/cancel, session/interrupt, session/interruptTurn, and session/close. String types list their known constants as examples; \"\" means unset, and providers may report other values.",
+  "errors": {
+    "codes": {
+      "-32000": "library error",
+      "-32601": "unknown method (ErrorInfo.Kind is unknown_method)",
+      "-32602": "invalid params (ErrorInfo.Kind is invalid_params)",
+      "-32700": "parse error (ErrorInfo.Kind is parse_error)",
+      "-32800": "cancelled by the client's $/cancelRequest (ErrorInfo.Kind is cancelled)"
+    },
+    "data": {
+      "$ref": "#/$defs/ErrorInfo"
+    },
+    "description": "Failed requests get a JSON-RPC error {code, message, data}, where data is an ErrorInfo. A line that is not JSON gets a -32700 error with a null id.",
+    "kinds": [
+      "unsupported",
+      "not_found",
+      "invalid_params",
+      "not_initialized",
+      "unknown_method",
+      "parse_error",
+      "protocol",
+      "exit",
+      "closed",
+      "interrupted",
+      "cancelled",
+      "session_not_found",
+      "request_done",
+      "invalid_answer",
+      "steer_rejected",
+      ""
+    ]
+  },
+  "events": {
+    "BackgroundTasksChanged": {
+      "$ref": "#/$defs/claude.BackgroundTasksChanged"
+    },
+    "CommandLifecycle": {
+      "$ref": "#/$defs/claude.CommandLifecycle"
+    },
+    "Compaction": {
+      "$ref": "#/$defs/agent.Compaction"
+    },
+    "ConversationReset": {
+      "$ref": "#/$defs/agent.ConversationReset"
+    },
+    "DeferredToolUse": {
+      "$ref": "#/$defs/claude.DeferredToolUse"
+    },
+    "DiffUpdated": {
+      "$ref": "#/$defs/codex.DiffUpdated"
+    },
+    "ElicitationRequest": {
+      "$ref": "#/$defs/agent.ElicitationRequest"
+    },
+    "EntryAppended": {
+      "$ref": "#/$defs/pi.EntryAppended"
+    },
+    "EventsDropped": {
+      "$ref": "#/$defs/agent.EventsDropped"
+    },
+    "ExtensionError": {
+      "$ref": "#/$defs/pi.ExtensionError"
+    },
+    "GoalUpdated": {
+      "$ref": "#/$defs/agent.GoalUpdated"
+    },
+    "HookRun": {
+      "$ref": "#/$defs/agent.HookRun"
+    },
+    "ItemCompleted": {
+      "$ref": "#/$defs/agent.ItemCompleted"
+    },
+    "ItemStarted": {
+      "$ref": "#/$defs/agent.ItemStarted"
+    },
+    "ItemUpdated": {
+      "$ref": "#/$defs/agent.ItemUpdated"
+    },
+    "ItemsRemoved": {
+      "$ref": "#/$defs/agent.ItemsRemoved"
+    },
+    "Notice": {
+      "$ref": "#/$defs/agent.Notice"
+    },
+    "OtherRateLimitUpdated": {
+      "$ref": "#/$defs/codex.OtherRateLimitUpdated"
+    },
+    "PermissionRequest": {
+      "$ref": "#/$defs/agent.PermissionRequest"
+    },
+    "PlanDelta": {
+      "$ref": "#/$defs/agent.PlanDelta"
+    },
+    "PlanUpdated": {
+      "$ref": "#/$defs/agent.PlanUpdated"
+    },
+    "PromptSuggestion": {
+      "$ref": "#/$defs/claude.PromptSuggestion"
+    },
+    "QueueUpdated": {
+      "$ref": "#/$defs/pi.QueueUpdated"
+    },
+    "RateLimitUpdated": {
+      "$ref": "#/$defs/agent.RateLimitUpdated"
+    },
+    "RawEvent": {
+      "$ref": "#/$defs/agent.RawEvent"
+    },
+    "ReasoningDelta": {
+      "$ref": "#/$defs/agent.ReasoningDelta"
+    },
+    "RequestResolved": {
+      "$ref": "#/$defs/agent.RequestResolved"
+    },
+    "Retry": {
+      "$ref": "#/$defs/agent.Retry"
+    },
+    "SessionStarted": {
+      "$ref": "#/$defs/agent.SessionStarted"
+    },
+    "SessionUpdated": {
+      "$ref": "#/$defs/agent.SessionUpdated"
+    },
+    "StatusChanged": {
+      "$ref": "#/$defs/agent.StatusChanged"
+    },
+    "TaskUpdated": {
+      "$ref": "#/$defs/agent.TaskUpdated"
+    },
+    "TerminalInteraction": {
+      "$ref": "#/$defs/codex.TerminalInteraction"
+    },
+    "TextDelta": {
+      "$ref": "#/$defs/agent.TextDelta"
+    },
+    "ToolInputDelta": {
+      "$ref": "#/$defs/agent.ToolInputDelta"
+    },
+    "ToolOutputDelta": {
+      "$ref": "#/$defs/agent.ToolOutputDelta"
+    },
+    "ToolProgress": {
+      "$ref": "#/$defs/claude.ToolProgress"
+    },
+    "ToolUseSummary": {
+      "$ref": "#/$defs/claude.ToolUseSummary"
+    },
+    "TurnCompleted": {
+      "$ref": "#/$defs/TurnCompletedWire"
+    },
+    "TurnStarted": {
+      "$ref": "#/$defs/agent.TurnStarted"
+    },
+    "UIUpdate": {
+      "$ref": "#/$defs/pi.UIUpdate"
+    },
+    "UsageUpdated": {
+      "$ref": "#/$defs/agent.UsageUpdated"
+    },
+    "UserInputRequest": {
+      "$ref": "#/$defs/agent.UserInputRequest"
+    }
+  },
+  "methods": {
+    "$/ping": {
+      "params": {
+        "properties": {},
+        "type": "object"
+      },
+      "result": {
+        "maxProperties": 0,
+        "type": "object"
+      }
+    },
+    "initialize": {
+      "params": {
+        "$ref": "#/$defs/InitializeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/InitializeResult"
+      }
+    },
+    "provider/check": {
+      "params": {
+        "$ref": "#/$defs/ProviderParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ProviderStatusWire"
+      }
+    },
+    "provider/deleteSession": {
+      "params": {
+        "$ref": "#/$defs/DeleteSessionParams"
+      },
+      "result": {
+        "maxProperties": 0,
+        "type": "object"
+      }
+    },
+    "provider/listModels": {
+      "params": {
+        "$ref": "#/$defs/ProviderParams"
+      },
+      "result": {
+        "anyOf": [
+          {
+            "items": {
+              "$ref": "#/$defs/agent.Model"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "provider/listSessions": {
+      "params": {
+        "$ref": "#/$defs/ListSessionsParams"
+      },
+      "result": {
+        "anyOf": [
+          {
+            "items": {
+              "$ref": "#/$defs/agent.SessionSummary"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "provider/listSubagents": {
+      "params": {
+        "$ref": "#/$defs/ListSubagentsParams"
+      },
+      "result": {
+        "anyOf": [
+          {
+            "items": {
+              "$ref": "#/$defs/agent.Task"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "provider/readHistory": {
+      "params": {
+        "$ref": "#/$defs/ReadHistoryParams"
+      },
+      "result": {
+        "anyOf": [
+          {
+            "items": {
+              "$ref": "#/$defs/agent.Item"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "request/cancel": {
+      "params": {
+        "$ref": "#/$defs/RequestParams"
+      },
+      "result": {
+        "maxProperties": 0,
+        "type": "object"
+      }
+    },
+    "request/respond": {
+      "params": {
+        "$ref": "#/$defs/RespondParams"
+      },
+      "result": {
+        "maxProperties": 0,
+        "type": "object"
+      }
+    },
+    "session/close": {
+      "params": {
+        "$ref": "#/$defs/SessionParams"
+      },
+      "result": {
+        "maxProperties": 0,
+        "type": "object"
+      }
+    },
+    "session/compact": {
+      "params": {
+        "$ref": "#/$defs/CompactParams"
+      },
+      "result": {
+        "maxProperties": 0,
+        "type": "object"
+      }
+    },
+    "session/fork": {
+      "params": {
+        "$ref": "#/$defs/ForkParams"
+      },
+      "result": {
+        "$ref": "#/$defs/StartResult"
+      }
+    },
+    "session/info": {
+      "params": {
+        "$ref": "#/$defs/SessionParams"
+      },
+      "result": {
+        "$ref": "#/$defs/agent.SessionInfo"
+      }
+    },
+    "session/interrupt": {
+      "params": {
+        "$ref": "#/$defs/SessionParams"
+      },
+      "result": {
+        "maxProperties": 0,
+        "type": "object"
+      }
+    },
+    "session/interruptTurn": {
+      "params": {
+        "$ref": "#/$defs/TurnParams"
+      },
+      "result": {
+        "maxProperties": 0,
+        "type": "object"
+      }
+    },
+    "session/pendingRequests": {
+      "params": {
+        "$ref": "#/$defs/SessionParams"
+      },
+      "result": {
+        "anyOf": [
+          {
+            "items": {
+              "$ref": "#/$defs/PendingRequest"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "session/rateLimits": {
+      "params": {
+        "$ref": "#/$defs/SessionParams"
+      },
+      "result": {
+        "anyOf": [
+          {
+            "items": {
+              "$ref": "#/$defs/agent.RateLimit"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "session/rewind": {
+      "params": {
+        "$ref": "#/$defs/TurnParams"
+      },
+      "result": {
+        "maxProperties": 0,
+        "type": "object"
+      }
+    },
+    "session/send": {
+      "params": {
+        "$ref": "#/$defs/SendParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SendResult"
+      }
+    },
+    "session/setEffort": {
+      "params": {
+        "$ref": "#/$defs/ValueParams"
+      },
+      "result": {
+        "maxProperties": 0,
+        "type": "object"
+      }
+    },
+    "session/setModel": {
+      "params": {
+        "$ref": "#/$defs/ValueParams"
+      },
+      "result": {
+        "maxProperties": 0,
+        "type": "object"
+      }
+    },
+    "session/setPermissionMode": {
+      "params": {
+        "$ref": "#/$defs/ValueParams"
+      },
+      "result": {
+        "maxProperties": 0,
+        "type": "object"
+      }
+    },
+    "session/setTitle": {
+      "params": {
+        "$ref": "#/$defs/ValueParams"
+      },
+      "result": {
+        "maxProperties": 0,
+        "type": "object"
+      }
+    },
+    "session/start": {
+      "params": {
+        "$ref": "#/$defs/StartParams"
+      },
+      "result": {
+        "$ref": "#/$defs/StartResult"
+      }
+    },
+    "session/stopTask": {
+      "params": {
+        "$ref": "#/$defs/StopTaskParams"
+      },
+      "result": {
+        "maxProperties": 0,
+        "type": "object"
+      }
+    }
+  },
+  "notifications": {
+    "$/cancelRequest": {
+      "direction": "agentd to client",
+      "params": {
+        "$ref": "#/$defs/CancelRequestParams"
+      }
+    },
+    "session/closed": {
+      "direction": "agentd to client",
+      "params": {
+        "$ref": "#/$defs/SessionClosedNotification"
+      }
+    },
+    "session/event": {
+      "direction": "agentd to client",
+      "params": {
+        "$ref": "#/$defs/EventNotification"
+      }
+    },
+    "turn/result": {
+      "direction": "agentd to client",
+      "params": {
+        "$ref": "#/$defs/TurnResultNotification"
+      }
+    },
+    "wire/tap": {
+      "direction": "agentd to client",
+      "params": {
+        "$ref": "#/$defs/WireTapNotification"
+      }
+    }
+  },
+  "protocolVersion": 1,
+  "providerOptions": {
+    "claude": {
+      "options": {
+        "$ref": "#/$defs/claude.Options"
+      },
+      "sessionOptions": {
+        "$ref": "#/$defs/claude.SessionOptions"
+      },
+      "turnOptions": {
+        "$ref": "#/$defs/claude.TurnOptions"
+      }
+    },
+    "codex": {
+      "options": {
+        "$ref": "#/$defs/codex.Options"
+      },
+      "sessionOptions": {
+        "$ref": "#/$defs/codex.SessionOptions"
+      },
+      "turnOptions": {
+        "$ref": "#/$defs/codex.TurnOptions"
+      }
+    },
+    "opencode": {
+      "options": {
+        "$ref": "#/$defs/opencode.Options"
+      },
+      "sessionOptions": {
+        "$ref": "#/$defs/opencode.SessionOptions"
+      },
+      "turnOptions": {
+        "$ref": "#/$defs/opencode.TurnOptions"
+      }
+    },
+    "pi": {
+      "options": {
+        "$ref": "#/$defs/pi.Options"
+      },
+      "sessionOptions": {
+        "$ref": "#/$defs/pi.SessionOptions"
+      }
+    }
+  },
+  "reverseRequests": {
+    "claude/controlRequest": {
+      "direction": "agentd to client; the client replies with the result",
+      "params": {
+        "$ref": "#/$defs/ControlRequestCall"
+      },
+      "result": {}
+    },
+    "claude/hook": {
+      "direction": "agentd to client; the client replies with the result",
+      "params": {
+        "$ref": "#/$defs/HookCall"
+      },
+      "result": {
+        "$ref": "#/$defs/claude.HookOutput"
+      }
+    },
+    "claude/userDialog": {
+      "direction": "agentd to client; the client replies with the result",
+      "params": {
+        "$ref": "#/$defs/UserDialogCall"
+      },
+      "result": {}
+    },
+    "codex/authTokensRefresh": {
+      "direction": "agentd to client; the client replies with the result",
+      "params": {
+        "$ref": "#/$defs/AuthTokensRefreshCall"
+      },
+      "result": {}
+    },
+    "handler/elicitation": {
+      "direction": "agentd to client; the client replies with the result",
+      "params": {
+        "$ref": "#/$defs/ElicitationCall"
+      },
+      "result": {
+        "$ref": "#/$defs/agent.ElicitationResponse"
+      }
+    },
+    "handler/permission": {
+      "direction": "agentd to client; the client replies with the result",
+      "params": {
+        "$ref": "#/$defs/PermissionCall"
+      },
+      "result": {
+        "$ref": "#/$defs/agent.PermissionResponse"
+      }
+    },
+    "handler/userInput": {
+      "direction": "agentd to client; the client replies with the result",
+      "params": {
+        "$ref": "#/$defs/UserInputCall"
+      },
+      "result": {
+        "$ref": "#/$defs/agent.UserInputResponse"
+      }
+    },
+    "tool/call": {
+      "direction": "agentd to client; the client replies with the result",
+      "params": {
+        "$ref": "#/$defs/ToolCall"
+      },
+      "result": {
+        "$ref": "#/$defs/agent.ToolResult"
+      }
+    }
+  },
+  "title": "agentd protocol"
+}
