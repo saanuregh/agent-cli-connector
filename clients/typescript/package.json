@@ -1,0 +1,22 @@
+{
+  "name": "agent-cli-connector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript client for agentd, the JSON-RPC server of agent-cli-connector",
+  "type": "module",
+  "engines": {
+    "node": ">=23.6"
+  },
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2"
+  }
+}

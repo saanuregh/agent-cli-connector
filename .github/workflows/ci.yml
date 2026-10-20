@@ -39,3 +39,36 @@ jobs:
       # tests against the scripted fake harnesses only.
       - name: test
         run: go test -race ./...
+
+  # The clients' tests drive internal/agentd/fakeagentd, so they need Go too.
+  typescript:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/typescript
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+
+  python:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/python
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: python -m unittest discover -s tests -v
