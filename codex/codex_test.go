@@ -323,7 +323,11 @@ func TestInterruptTurnDropsQueuedAndStopsRunning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sess.Close()
+	defer func() {
+		sess.Close()
+		for range sess.Events() {
+		}
+	}()
 	var _ agent.TurnInterrupter = sess
 	first, err := sess.Send(ctx, agent.Text("work"))
 	if err != nil {
@@ -435,7 +439,11 @@ func TestConfigOutputSchemaAppliesToTurnsWithoutTheirOwn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sess.Close()
+	defer func() {
+		sess.Close()
+		for range sess.Events() {
+		}
+	}()
 	res, err := sess.Run(ctx, agent.Text("one"))
 	if err != nil {
 		t.Fatal(err)

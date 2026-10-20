@@ -24,6 +24,7 @@ func TestSessionEndsWhenServerExitsAfterThreadStart(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatalf("shared=%v: session did not end after the app-server exited", shared)
 			}
+			_ = sess.Close()
 		}
 		_ = p.Close()
 	}

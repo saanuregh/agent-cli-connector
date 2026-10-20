@@ -1,0 +1,30 @@
+name: codex-schema
+
+# Regenerates the Codex app-server schema from the latest Codex release and
+# checks the fields the codex package reads against it, so a protocol change
+# upstream shows up here instead of in a user's session.
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+      - name: install codex
+        run: npm install -g @openai/codex@latest && codex --version
+      - name: regenerate schema
+        run: go generate ./codex && git diff --stat codex/testdata
+      - name: drift test
+        run: go test ./codex -run TestWireDrift

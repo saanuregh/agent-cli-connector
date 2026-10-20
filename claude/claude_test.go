@@ -197,6 +197,7 @@ func TestInterruptControlErrorAndExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer sess.Close()
 	var perr *agent.ProtocolError
 	if err := sess.SetModel(ctx, "nope"); !errors.As(err, &perr) || perr.Message != "unknown model" {
 		t.Errorf("SetModel error = %v", err)

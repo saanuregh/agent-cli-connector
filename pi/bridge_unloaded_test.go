@@ -31,7 +31,11 @@ func TestSwitchWithoutBridgeRefusesGatedTurns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sess.Close()
+	defer func() {
+		sess.Close()
+		for range sess.Events() {
+		}
+	}()
 	if _, err := sess.NewSession(ctx, ""); err != nil {
 		t.Fatal(err)
 	}

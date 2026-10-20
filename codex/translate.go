@@ -216,9 +216,7 @@ func (t *translator) notify(msg *jsonrpc.Message, line []byte) {
 	_ = json.Unmarshal(msg.Params, &p)
 	meta.TurnID = p.TurnID
 	if msg.Method == "serverRequest/resolved" {
-		var f struct {
-			RequestID json.RawMessage `json:"requestId"`
-		}
+		var f serverRequestResolvedParams
 		_ = json.Unmarshal(msg.Params, &f)
 		t.s.rt.WithdrawRequest(requestKey(f.RequestID))
 		return
@@ -247,26 +245,15 @@ func (t *translator) notify(msg *jsonrpc.Message, line []byte) {
 	case "item/commandExecution/outputDelta", "item/fileChange/outputDelta":
 		t.emit(&agent.ToolOutputDelta{EventMeta: meta, ItemID: p.ItemID, Delta: p.Delta})
 	case "item/mcpToolCall/progress":
-		var f struct {
-			Message string `json:"message"`
-		}
+		var f mcpToolCallProgressParams
 		_ = json.Unmarshal(msg.Params, &f)
 		t.emit(&agent.ToolOutputDelta{EventMeta: meta, ItemID: p.ItemID, Delta: f.Message + "\n"})
 	case "item/commandExecution/terminalInteraction":
-		var f struct {
-			ProcessID string `json:"processId"`
-			Stdin     string `json:"stdin"`
-		}
+		var f terminalInteractionParams
 		_ = json.Unmarshal(msg.Params, &f)
 		t.emit(&TerminalInteraction{EventMeta: meta, ItemID: p.ItemID, ProcessID: f.ProcessID, Stdin: f.Stdin})
 	case "turn/plan/updated":
-		var f struct {
-			Explanation *string `json:"explanation"`
-			Plan        []struct {
-				Step   string `json:"step"`
-				Status string `json:"status"`
-			} `json:"plan"`
-		}
+		var f turnPlanUpdatedParams
 		_ = json.Unmarshal(msg.Params, &f)
 		steps := make([]agent.PlanStep, 0, len(f.Plan))
 		for _, st := range f.Plan {
@@ -285,20 +272,13 @@ func (t *translator) notify(msg *jsonrpc.Message, line []byte) {
 		}
 		t.emit(ev)
 	case "turn/diff/updated":
-		var f struct {
-			Diff string `json:"diff"`
-		}
+		var f turnDiffUpdatedParams
 		_ = json.Unmarshal(msg.Params, &f)
 		t.emit(&DiffUpdated{EventMeta: meta, Diff: f.Diff})
 	case "thread/tokenUsage/updated":
 		t.tokenUsage(p.TurnID, msg.Params, meta)
 	case "thread/status/changed":
-		var f struct {
-			Status struct {
-				Type        string   `json:"type"`
-				ActiveFlags []string `json:"activeFlags"`
-			} `json:"status"`
-		}
+		var f threadStatusChangedParams
 		_ = json.Unmarshal(msg.Params, &f)
 		switch f.Status.Type {
 		case "idle":
@@ -315,10 +295,7 @@ func (t *translator) notify(msg *jsonrpc.Message, line []byte) {
 			t.emit(&agent.Notice{EventMeta: meta, Level: agent.NoticeError, Code: "systemError", Message: "thread entered a system error state"})
 		}
 	case "error":
-		var f struct {
-			Error     wireTurnError `json:"error"`
-			WillRetry bool          `json:"willRetry"`
-		}
+		var f errorNotificationParams
 		_ = json.Unmarshal(msg.Params, &f)
 		if f.WillRetry {
 			t.emit(t.retry(p.TurnID, f.Error, meta))
@@ -326,9 +303,7 @@ func (t *translator) notify(msg *jsonrpc.Message, line []byte) {
 			t.emit(&agent.Notice{EventMeta: meta, Level: agent.NoticeError, Code: errorCode(f.Error.CodexErrorInfo), Message: f.Error.message()})
 		}
 	case "thread/name/updated":
-		var f struct {
-			Name *string `json:"threadName"`
-		}
+		var f threadNameUpdatedParams
 		_ = json.Unmarshal(msg.Params, &f)
 		t.s.updateInfo(meta, func(i *agent.SessionInfo) {
 			i.Title = ""
@@ -337,12 +312,7 @@ func (t *translator) notify(msg *jsonrpc.Message, line []byte) {
 			}
 		})
 	case "thread/settings/updated":
-		var f struct {
-			Settings struct {
-				Model  *string `json:"model"`
-				Effort *string `json:"effort"`
-			} `json:"threadSettings"`
-		}
+		var f threadSettingsUpdatedParams
 		_ = json.Unmarshal(msg.Params, &f)
 		t.s.updateInfo(meta, func(i *agent.SessionInfo) {
 			if f.Settings.Model != nil {
@@ -354,28 +324,16 @@ func (t *translator) notify(msg *jsonrpc.Message, line []byte) {
 			}
 		})
 	case "model/rerouted":
-		var f struct {
-			From   string `json:"fromModel"`
-			To     string `json:"toModel"`
-			Reason any    `json:"reason"`
-		}
+		var f modelReroutedParams
 		_ = json.Unmarshal(msg.Params, &f)
 		t.emit(&agent.Notice{EventMeta: meta, Level: agent.NoticeWarning, Code: "model_rerouted", Message: fmt.Sprintf("model rerouted from %s to %s (%v)", f.From, f.To, f.Reason)})
 		t.s.updateInfo(meta, func(i *agent.SessionInfo) { i.Model = f.To })
 	case "warning", "configWarning", "deprecationNotice", "guardianWarning":
-		var f struct {
-			Message string `json:"message"`
-			Summary string `json:"summary"`
-			Details string `json:"details"`
-		}
+		var f warningParams
 		_ = json.Unmarshal(msg.Params, &f)
 		t.emit(&agent.Notice{EventMeta: meta, Level: agent.NoticeWarning, Code: msg.Method, Message: cmp.Or(f.Message, f.Summary, f.Details)})
 	case "mcpServer/startupStatus/updated":
-		var f struct {
-			Name   string  `json:"name"`
-			Status string  `json:"status"`
-			Error  *string `json:"error"`
-		}
+		var f mcpServerStartupStatusParams
 		_ = json.Unmarshal(msg.Params, &f)
 		t.s.updateInfo(meta, func(i *agent.SessionInfo) {
 			status := agent.MCPServerStatus{Name: f.Name, Status: f.Status}
@@ -390,18 +348,7 @@ func (t *translator) notify(msg *jsonrpc.Message, line []byte) {
 			}
 		})
 	case "hook/started", "hook/completed":
-		var f struct {
-			Run struct {
-				ID            string  `json:"id"`
-				EventName     string  `json:"eventName"`
-				SourcePath    string  `json:"sourcePath"`
-				Status        string  `json:"status"`
-				StatusMessage *string `json:"statusMessage"`
-				Entries       []struct {
-					Text string `json:"text"`
-				} `json:"entries"`
-			} `json:"run"`
-		}
+		var f hookRunParams
 		_ = json.Unmarshal(msg.Params, &f)
 		var out []string
 		for _, e := range f.Run.Entries {
@@ -413,17 +360,13 @@ func (t *translator) notify(msg *jsonrpc.Message, line []byte) {
 		t.emit(&agent.HookRun{EventMeta: meta, ID: f.Run.ID, Event: f.Run.EventName, Name: f.Run.SourcePath,
 			Done: msg.Method == "hook/completed", Status: f.Run.Status, Outcome: hookOutcome(f.Run.Status), Output: strings.Join(out, "\n")})
 	case "thread/goal/updated":
-		var f struct {
-			Goal goalWire `json:"goal"`
-		}
+		var f threadGoalUpdatedParams
 		_ = json.Unmarshal(msg.Params, &f)
 		t.emit(&agent.GoalUpdated{EventMeta: meta, Goal: f.Goal.goal()})
 	case "thread/goal/cleared":
 		t.emit(&agent.GoalUpdated{EventMeta: meta})
 	case "account/rateLimits/updated":
-		var f struct {
-			RateLimits map[string]json.RawMessage `json:"rateLimits"`
-		}
+		var f rateLimitsUpdatedParams
 		_ = json.Unmarshal(msg.Params, &f)
 		snap := t.mergeRateLimits(f.RateLimits)
 		if snap.id() == mainLimitID {
@@ -690,13 +633,7 @@ func (t *translator) endRunningItems(turnID string, status agent.TurnStatus) {
 // total that went down, as after a revert or compaction, counts the latest
 // request's usage instead; updates for other turns only move the baseline.
 func (t *translator) tokenUsage(turnID string, params json.RawMessage, meta agent.EventMeta) {
-	var f struct {
-		TokenUsage struct {
-			Total              tokenUsage `json:"total"`
-			Last               tokenUsage `json:"last"`
-			ModelContextWindow *int64     `json:"modelContextWindow"`
-		} `json:"tokenUsage"`
-	}
+	var f tokenUsageUpdatedParams
 	if json.Unmarshal(params, &f) != nil {
 		return
 	}
@@ -958,12 +895,7 @@ func (t *translator) childNotify(msg *jsonrpc.Message, p turnParams, parent stri
 		})
 		t.stopLateChildTurn(child, p.Turn.ID, providerutil.Deref(p.Turn.RootTurnID))
 	case "thread/settings/updated":
-		var f struct {
-			Settings struct {
-				Model  *string `json:"model"`
-				Effort *string `json:"effort"`
-			} `json:"threadSettings"`
-		}
+		var f threadSettingsUpdatedParams
 		_ = json.Unmarshal(msg.Params, &f)
 		t.updateTask(child, meta, func(task *agent.Task) {
 			if f.Settings.Model != nil {
@@ -974,9 +906,7 @@ func (t *translator) childNotify(msg *jsonrpc.Message, p turnParams, parent stri
 			}
 		})
 	case "model/rerouted":
-		var f struct {
-			To string `json:"toModel"`
-		}
+		var f childModelReroutedParams
 		_ = json.Unmarshal(msg.Params, &f)
 		t.updateTask(child, meta, func(task *agent.Task) { task.Subagent.Model = f.To })
 	case "turn/completed":
@@ -1004,11 +934,7 @@ func (t *translator) childNotify(msg *jsonrpc.Message, p turnParams, parent stri
 			}
 		})
 	case "thread/tokenUsage/updated":
-		var f struct {
-			TokenUsage struct {
-				Total tokenUsage `json:"total"`
-			} `json:"tokenUsage"`
-		}
+		var f childTokenUsageUpdatedParams
 		if json.Unmarshal(msg.Params, &f) == nil {
 			t.updateTask(child, meta, func(task *agent.Task) {
 				u := f.TokenUsage.Total.usage()
@@ -1264,12 +1190,7 @@ func subagentChanges(raw json.RawMessage, sender string, senderDepth int, skip f
 			}
 		}})
 	case "collabAgentToolCall":
-		var f struct {
-			AgentsStates map[string]struct {
-				Status  string  `json:"status"`
-				Message *string `json:"message"`
-			} `json:"agentsStates"`
-		}
+		var f collabAgentStates
 		_ = json.Unmarshal(raw, &f)
 		for _, thread := range ti.ReceiverThreadIDs {
 			if skip(thread) {
@@ -1416,10 +1337,7 @@ func convertItem(raw json.RawMessage) (agent.Item, itemExtra) {
 	switch ti.Type {
 	case "userMessage":
 		it.Kind = agent.ItemUserMessage
-		var parts []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		}
+		var parts []userInputPart
 		_ = json.Unmarshal(ti.Content, &parts)
 		var texts []string
 		for _, p := range parts {
@@ -1500,15 +1418,7 @@ func convertItem(raw json.RawMessage) (agent.Item, itemExtra) {
 			call.IsError = true
 			call.Output = ti.Error.Message
 		} else if nonNull(ti.Result) != nil {
-			var r struct {
-				Content []struct {
-					Type     string `json:"type"`
-					Text     string `json:"text"`
-					Data     string `json:"data"`
-					MimeType string `json:"mimeType"`
-				} `json:"content"`
-				Structured json.RawMessage `json:"structuredContent"`
-			}
+			var r mcpToolCallResult
 			_ = json.Unmarshal(ti.Result, &r)
 			var texts []string
 			for _, c := range r.Content {
@@ -1613,9 +1523,7 @@ func convertItem(raw json.RawMessage) (agent.Item, itemExtra) {
 		if f := nonNull(ti.Failure); f != nil || it.Status == agent.ItemFailed {
 			it.Status = agent.ItemFailed
 			call.IsError = true
-			var failure struct {
-				Type string `json:"type"`
-			}
+			var failure imageGenerationFailure
 			_ = json.Unmarshal(f, &failure)
 			call.Output = cmp.Or(failure.Type, "image generation failed")
 			call.OutputData = f
@@ -1656,11 +1564,7 @@ func (t *translator) serverRequest(msg *jsonrpc.Message, line []byte) (any, erro
 
 	switch msg.Method {
 	case "item/tool/call":
-		var f struct {
-			CallID    string          `json:"callId"`
-			Tool      string          `json:"tool"`
-			Arguments json.RawMessage `json:"arguments"`
-		}
+		var f dynamicToolCallParams
 		_ = json.Unmarshal(msg.Params, &f)
 		tool, ok := s.tools[f.Tool]
 		if !ok {
@@ -1670,14 +1574,7 @@ func (t *translator) serverRequest(msg *jsonrpc.Message, line []byte) (any, erro
 		return dynamicToolResult(res), nil
 
 	case "item/commandExecution/requestApproval":
-		var f struct {
-			ItemID    string            `json:"itemId"`
-			Reason    *string           `json:"reason"`
-			Command   *string           `json:"command"`
-			Cwd       *string           `json:"cwd"`
-			Amendment json.RawMessage   `json:"proposedExecpolicyAmendment"`
-			Available []json.RawMessage `json:"availableDecisions"`
-		}
+		var f commandExecutionApprovalParams
 		_ = json.Unmarshal(msg.Params, &f)
 		req := agent.PermissionRequest{
 			EventMeta:  meta,
@@ -1698,11 +1595,7 @@ func (t *translator) serverRequest(msg *jsonrpc.Message, line []byte) (any, erro
 		})
 
 	case "item/fileChange/requestApproval":
-		var f struct {
-			ItemID    string  `json:"itemId"`
-			Reason    *string `json:"reason"`
-			GrantRoot *string `json:"grantRoot"`
-		}
+		var f fileChangeApprovalParams
 		_ = json.Unmarshal(msg.Params, &f)
 		s.mu.Lock()
 		item := t.items[f.ItemID]
@@ -1747,12 +1640,7 @@ func (t *translator) serverRequest(msg *jsonrpc.Message, line []byte) (any, erro
 		})
 
 	case "item/permissions/requestApproval":
-		var f struct {
-			ItemID      string          `json:"itemId"`
-			Cwd         string          `json:"cwd"`
-			Reason      *string         `json:"reason"`
-			Permissions json.RawMessage `json:"permissions"`
-		}
+		var f permissionsApprovalParams
 		_ = json.Unmarshal(msg.Params, &f)
 		req := agent.PermissionRequest{
 			EventMeta:  meta,
@@ -1787,20 +1675,7 @@ func (t *translator) serverRequest(msg *jsonrpc.Message, line []byte) (any, erro
 		})
 
 	case "item/tool/requestUserInput":
-		var f struct {
-			ItemID    string `json:"itemId"`
-			Questions []struct {
-				ID       string `json:"id"`
-				Header   string `json:"header"`
-				Question string `json:"question"`
-				IsOther  bool   `json:"isOther"`
-				IsSecret bool   `json:"isSecret"`
-				Options  []struct {
-					Label       string `json:"label"`
-					Description string `json:"description"`
-				} `json:"options"`
-			} `json:"questions"`
-		}
+		var f toolRequestUserInputParams
 		_ = json.Unmarshal(msg.Params, &f)
 		questions := make([]agent.Question, 0, len(f.Questions))
 		for _, q := range f.Questions {
@@ -1823,16 +1698,7 @@ func (t *translator) serverRequest(msg *jsonrpc.Message, line []byte) (any, erro
 		return nil, jsonrpc.ErrDeferred
 
 	case "mcpServer/elicitation/request":
-		var f struct {
-			ServerName      string          `json:"serverName"`
-			Mode            string          `json:"mode"`
-			Message         string          `json:"message"`
-			Description     string          `json:"description"`
-			URL             string          `json:"url"`
-			ElicitationID   string          `json:"elicitationId"`
-			RequestedSchema json.RawMessage `json:"requestedSchema"`
-			Meta            json.RawMessage `json:"_meta"`
-		}
+		var f mcpElicitationParams
 		_ = json.Unmarshal(msg.Params, &f)
 		s.rt.Request(providerkit.NewElicitationRequest(agent.ElicitationRequest{
 			EventMeta:     meta,
@@ -1858,14 +1724,7 @@ func (t *translator) serverRequest(msg *jsonrpc.Message, line []byte) (any, erro
 		return nil, jsonrpc.ErrDeferred
 
 	case "applyPatchApproval", "execCommandApproval":
-		var f struct {
-			CallID      string          `json:"callId"`
-			Command     []string        `json:"command"`
-			Cwd         string          `json:"cwd"`
-			Reason      *string         `json:"reason"`
-			FileChanges json.RawMessage `json:"fileChanges"`
-			GrantRoot   *string         `json:"grantRoot"`
-		}
+		var f legacyApprovalParams
 		_ = json.Unmarshal(msg.Params, &f)
 		kind := agent.PermissionCommand
 		if msg.Method == "applyPatchApproval" {
@@ -1960,6 +1819,7 @@ func commandDecision(resp agent.PermissionResponse, available []json.RawMessage,
 	offered := func(name string) bool {
 		return len(available) == 0 || slices.ContainsFunc(available, func(raw json.RawMessage) bool { return decisionName(raw) == name })
 	}
+	//exhaustive:enforce
 	switch resp.Decision {
 	case agent.DecisionAllowAlways:
 		if offered("acceptWithExecpolicyAmendment") && nonNull(amendment) != nil {
@@ -1978,6 +1838,8 @@ func commandDecision(resp agent.PermissionResponse, available []json.RawMessage,
 		return "cancel"
 	case agent.DecisionCancel:
 		return "cancel"
+	case agent.DecisionAllow:
+		fallthrough
 	default:
 		return "accept"
 	}
@@ -2143,4 +2005,198 @@ func (r rateLimitSnapshot) limits() []agent.RateLimit {
 		out[0].Status = agent.RateLimitExceeded
 	}
 	return out
+}
+
+type serverRequestResolvedParams struct {
+	RequestID json.RawMessage `json:"requestId"`
+}
+
+type mcpToolCallProgressParams struct {
+	Message string `json:"message"`
+}
+
+type terminalInteractionParams struct {
+	ProcessID string `json:"processId"`
+	Stdin     string `json:"stdin"`
+}
+
+type turnPlanUpdatedParams struct {
+	Explanation *string `json:"explanation"`
+	Plan        []struct {
+		Step   string `json:"step"`
+		Status string `json:"status"`
+	} `json:"plan"`
+}
+
+type turnDiffUpdatedParams struct {
+	Diff string `json:"diff"`
+}
+
+type threadStatusChangedParams struct {
+	Status struct {
+		Type        string   `json:"type"`
+		ActiveFlags []string `json:"activeFlags"`
+	} `json:"status"`
+}
+
+type errorNotificationParams struct {
+	Error     wireTurnError `json:"error"`
+	WillRetry bool          `json:"willRetry"`
+}
+
+type threadNameUpdatedParams struct {
+	Name *string `json:"threadName"`
+}
+
+type threadSettingsUpdatedParams struct {
+	Settings struct {
+		Model  *string `json:"model"`
+		Effort *string `json:"effort"`
+	} `json:"threadSettings"`
+}
+
+type modelReroutedParams struct {
+	From   string `json:"fromModel"`
+	To     string `json:"toModel"`
+	Reason any    `json:"reason"`
+}
+
+type warningParams struct {
+	Message string `json:"message"`
+	Summary string `json:"summary"`
+	Details string `json:"details"`
+}
+
+type mcpServerStartupStatusParams struct {
+	Name   string  `json:"name"`
+	Status string  `json:"status"`
+	Error  *string `json:"error"`
+}
+
+type hookRunParams struct {
+	Run struct {
+		ID            string  `json:"id"`
+		EventName     string  `json:"eventName"`
+		SourcePath    string  `json:"sourcePath"`
+		Status        string  `json:"status"`
+		StatusMessage *string `json:"statusMessage"`
+		Entries       []struct {
+			Text string `json:"text"`
+		} `json:"entries"`
+	} `json:"run"`
+}
+
+type threadGoalUpdatedParams struct {
+	Goal goalWire `json:"goal"`
+}
+
+type rateLimitsUpdatedParams struct {
+	RateLimits map[string]json.RawMessage `json:"rateLimits"`
+}
+
+type tokenUsageUpdatedParams struct {
+	TokenUsage struct {
+		Total              tokenUsage `json:"total"`
+		Last               tokenUsage `json:"last"`
+		ModelContextWindow *int64     `json:"modelContextWindow"`
+	} `json:"tokenUsage"`
+}
+
+type childModelReroutedParams struct {
+	To string `json:"toModel"`
+}
+
+type childTokenUsageUpdatedParams struct {
+	TokenUsage struct {
+		Total tokenUsage `json:"total"`
+	} `json:"tokenUsage"`
+}
+
+type collabAgentStates struct {
+	AgentsStates map[string]struct {
+		Status  string  `json:"status"`
+		Message *string `json:"message"`
+	} `json:"agentsStates"`
+}
+
+type mcpToolCallResult struct {
+	Content []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		Data     string `json:"data"`
+		MimeType string `json:"mimeType"`
+	} `json:"content"`
+	Structured json.RawMessage `json:"structuredContent"`
+}
+
+type imageGenerationFailure struct {
+	Type string `json:"type"`
+}
+
+type dynamicToolCallParams struct {
+	CallID    string          `json:"callId"`
+	Tool      string          `json:"tool"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+type commandExecutionApprovalParams struct {
+	ItemID    string            `json:"itemId"`
+	Reason    *string           `json:"reason"`
+	Command   *string           `json:"command"`
+	Cwd       *string           `json:"cwd"`
+	Amendment json.RawMessage   `json:"proposedExecpolicyAmendment"`
+	Available []json.RawMessage `json:"availableDecisions"`
+}
+
+type fileChangeApprovalParams struct {
+	ItemID    string  `json:"itemId"`
+	Reason    *string `json:"reason"`
+	GrantRoot *string `json:"grantRoot"`
+}
+
+type permissionsApprovalParams struct {
+	ItemID      string          `json:"itemId"`
+	Cwd         string          `json:"cwd"`
+	Reason      *string         `json:"reason"`
+	Permissions json.RawMessage `json:"permissions"`
+}
+
+type toolRequestUserInputParams struct {
+	ItemID    string `json:"itemId"`
+	Questions []struct {
+		ID       string `json:"id"`
+		Header   string `json:"header"`
+		Question string `json:"question"`
+		IsOther  bool   `json:"isOther"`
+		IsSecret bool   `json:"isSecret"`
+		Options  []struct {
+			Label       string `json:"label"`
+			Description string `json:"description"`
+		} `json:"options"`
+	} `json:"questions"`
+}
+
+type mcpElicitationParams struct {
+	ServerName      string          `json:"serverName"`
+	Mode            string          `json:"mode"`
+	Message         string          `json:"message"`
+	Description     string          `json:"description"`
+	URL             string          `json:"url"`
+	ElicitationID   string          `json:"elicitationId"`
+	RequestedSchema json.RawMessage `json:"requestedSchema"`
+	Meta            json.RawMessage `json:"_meta"`
+}
+
+type legacyApprovalParams struct {
+	CallID      string          `json:"callId"`
+	Command     []string        `json:"command"`
+	Cwd         string          `json:"cwd"`
+	Reason      *string         `json:"reason"`
+	FileChanges json.RawMessage `json:"fileChanges"`
+	GrantRoot   *string         `json:"grantRoot"`
+}
+
+type userInputPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
 }

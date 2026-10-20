@@ -54,7 +54,11 @@ func TestSubagentsPlansAndSharedEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sess.Close()
+	defer func() {
+		sess.Close()
+		for range sess.Events() {
+		}
+	}()
 	if _, err := sess.Run(ctx, agent.Text("go")); err != nil {
 		t.Fatal(err)
 	}

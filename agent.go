@@ -189,7 +189,10 @@ type Session interface {
 	// returned on every call. It is closed after the session ends and the
 	// last event was delivered. Events are queued without limit until read
 	// unless Config.EventBufferLimit is set, so a session that is never
-	// drained grows in memory.
+	// drained grows in memory. Delivery starts on the first call: once
+	// called, read the channel until it closes, because an abandoned
+	// channel keeps a goroutine and the undelivered events alive after the
+	// session ends.
 	Events() <-chan Event
 
 	// Send submits input. When the session is idle a new turn starts. When

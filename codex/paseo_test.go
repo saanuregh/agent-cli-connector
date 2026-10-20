@@ -72,7 +72,11 @@ func TestSandboxReuseAndInterruptDuringStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sess.Close()
+	defer func() {
+		sess.Close()
+		for range sess.Events() {
+		}
+	}()
 	sent := make(chan *agent.Turn, 1)
 	go func() {
 		turn, err := sess.Send(ctx, agent.Input{Parts: []agent.Part{agent.TextPart("go")}, ProviderOptions: codex.TurnOptions{SandboxPolicy: "workspace-write"}})
@@ -185,7 +189,11 @@ func TestForkAndRewindKeepSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sess.Close()
+	defer func() {
+		sess.Close()
+		for range sess.Events() {
+		}
+	}()
 	forked, err := sess.ForkSession(ctx, agent.Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -274,7 +282,11 @@ func TestSteerRejectionAsyncAnswersAndStrictSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sess.Close()
+	defer func() {
+		sess.Close()
+		for range sess.Events() {
+		}
+	}()
 	in := agent.Text("go")
 	in.OutputSchema = json.RawMessage(`{"type":"object","properties":{"b":{"type":"string"},"a":{"type":"number"}},"required":["b"]}`)
 	if _, err := sess.Send(ctx, in); err != nil {

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	agent "github.com/saanuregh/agent-cli-connector"
@@ -33,6 +34,7 @@ func TestStartupEventsFollowSessionStarted(t *testing.T) {
 	rt.Started(&agent.SessionStarted{})
 	rt.Emit(&agent.Notice{Message: "late"})
 	ch := rt.Events()
+	defer finishAndDrain(rt)
 	if _, ok := next(t, ch).(*agent.SessionStarted); !ok {
 		t.Fatal("first event is not SessionStarted")
 	}
@@ -58,6 +60,7 @@ func TestStatusDedupAndTurnStamping(t *testing.T) {
 	rt.Emit(&agent.StatusChanged{Status: agent.StatusIdle})
 
 	ch := rt.Events()
+	defer finishAndDrain(rt)
 	next(t, ch)
 	if s := next(t, ch).(*agent.StatusChanged); s.TurnID != "t1" {
 		t.Errorf("status turn = %q", s.TurnID)
@@ -95,6 +98,7 @@ func TestRequestHandlerAndResolution(t *testing.T) {
 		t.Errorf("response = %+v", resp)
 	}
 	ch := rt.Events()
+	defer finishAndDrain(rt)
 	next(t, ch)
 	resolved := next(t, ch).(*agent.RequestResolved)
 	if resolved.Outcome != agent.RequestAnswered || resolved.Request != req {
@@ -149,6 +153,7 @@ func TestQueueLimitReportsDrops(t *testing.T) {
 		rt.Emit(&agent.Notice{Message: "n"})
 	}
 	ch := rt.Events()
+	defer finishAndDrain(rt)
 	dropped := next(t, ch).(*agent.EventsDropped)
 	if dropped.Count != 8 {
 		t.Errorf("dropped = %d, want 8", dropped.Count)
@@ -259,6 +264,7 @@ func TestLimitNeverDropsRequests(t *testing.T) {
 		rt.Emit(&agent.Notice{})
 	}
 	ch := rt.Events()
+	defer finishAndDrain(rt)
 	seen := false
 	for range 4 {
 		if next(t, ch) == agent.Event(req) {
@@ -302,7 +308,9 @@ func TestNewTurnForEndedTurnReturnsEndedHandle(t *testing.T) {
 	}
 }
 
-func TestTurnEventsReplayAndFollow(t *testing.T) {
+func TestTurnEventsReplayAndFollow(t *testing.T) { synctest.Test(t, testTurnEventsReplayAndFollow) }
+
+func testTurnEventsReplayAndFollow(t *testing.T) {
 	rt := NewRuntime("test", agent.Config{})
 	rt.Started(&agent.SessionStarted{})
 	turn, err := rt.NewTurn("t1")
@@ -328,7 +336,7 @@ func TestTurnEventsReplayAndFollow(t *testing.T) {
 		}
 		got <- names
 	}()
-	time.Sleep(20 * time.Millisecond)
+	synctest.Wait() // the reader has replayed and waits for more
 	rt.Emit(&agent.TextDelta{EventMeta: agent.EventMeta{TurnID: "t1"}, Delta: "b"})
 	rt.FinishTurn("t1", &agent.TurnResult{Status: agent.TurnSucceeded})
 	select {
@@ -348,5 +356,13 @@ func TestTurnEventsReplayAndFollow(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("second range yielded %d events before break", n)
+	}
+}
+
+// finishAndDrain ends rt and reads its events until the channel closes, so
+// the delivery goroutine exits.
+func finishAndDrain(rt *Runtime) {
+	rt.Finish(nil)
+	for range rt.Events() {
 	}
 }

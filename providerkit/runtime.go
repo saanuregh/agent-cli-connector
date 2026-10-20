@@ -561,7 +561,9 @@ func (r *Runtime) Finish(err error) {
 	turns := r.turns
 	r.turns = nil
 	r.inputs = nil
-	pending := r.pending
+	// A copy: a request resolving after the unlock deletes from r.pending,
+	// which shifts and clears its backing array.
+	pending := slices.Clone(r.pending)
 	r.mu.Unlock()
 
 	turnErr := err

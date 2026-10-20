@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	agent "github.com/saanuregh/agent-cli-connector"
@@ -37,16 +38,23 @@ func (l *startLog) next(t *testing.T) string {
 	}
 }
 
+// none must run in a synctest bubble: it waits until every goroutine is
+// blocked, so a start that was going to happen has happened.
 func (l *startLog) none(t *testing.T) {
 	t.Helper()
+	synctest.Wait()
 	select {
 	case id := <-l.ch:
 		t.Fatalf("unexpected start of %s", id)
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 }
 
 func TestQueueStartsInOrderWhenSlotFrees(t *testing.T) {
+	synctest.Test(t, testQueueStartsInOrderWhenSlotFrees)
+}
+
+func testQueueStartsInOrderWhenSlotFrees(t *testing.T) {
 	rt := NewRuntime("test", agent.Config{})
 	log := newStartLog()
 	rt.SetStarter(func(_ context.Context, id string, _ agent.Input) error { log.add(id); return nil })
@@ -129,6 +137,10 @@ func TestStartThatEndsTurnMovesOn(t *testing.T) {
 }
 
 func TestSteerGateHoldsQueueAndAdopts(t *testing.T) {
+	synctest.Test(t, testSteerGateHoldsQueueAndAdopts)
+}
+
+func testSteerGateHoldsQueueAndAdopts(t *testing.T) {
 	rt := NewRuntime("test", agent.Config{})
 	log := newStartLog()
 	rt.SetStarter(func(_ context.Context, id string, _ agent.Input) error { log.add(id); return nil })
@@ -165,15 +177,15 @@ func TestSteerGateHoldsQueueAndAdopts(t *testing.T) {
 	}
 }
 
-func TestSteerRefusedWhileStarting(t *testing.T) {
+func TestSteerRefusedWhileStarting(t *testing.T) { synctest.Test(t, testSteerRefusedWhileStarting) }
+
+func testSteerRefusedWhileStarting(t *testing.T) {
 	rt := NewRuntime("test", agent.Config{})
 	release := make(chan struct{})
 	go rt.StartIdle(context.Background(), "a", func(context.Context) error { <-release; return nil })
-	for {
-		if id, starting := rt.Running(); id == "a" && starting {
-			break
-		}
-		time.Sleep(time.Millisecond)
+	synctest.Wait()
+	if id, starting := rt.Running(); id != "a" || !starting {
+		t.Fatalf("Running() = %q, %v; want a, starting", id, starting)
 	}
 	if rt.BeginSteer("s", "a") {
 		t.Error("steer accepted while the turn starts")
@@ -265,15 +277,12 @@ func TestInterruptByPreRenameID(t *testing.T) {
 	close(release)
 }
 
-// waitStarted waits until turn id holds the slot with its start done.
+// waitStarted checks that turn id holds the slot with its start done once
+// every goroutine is blocked. It must run in a synctest bubble.
 func waitStarted(t *testing.T, rt *Runtime, id string) {
 	t.Helper()
-	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(time.Millisecond) {
-		if running, starting := rt.Running(); running == id && !starting {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s never finished starting", id)
-		}
+	synctest.Wait()
+	if running, starting := rt.Running(); running != id || starting {
+		t.Fatalf("Running() = %q, %v; want %s started", running, starting, id)
 	}
 }

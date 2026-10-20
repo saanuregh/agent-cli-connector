@@ -533,7 +533,11 @@ func TestPrewarmAndClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sess.Close()
+	defer func() {
+		sess.Close()
+		for range sess.Events() {
+		}
+	}()
 	claim := <-claims
 	if fakeproc.Str(claim, "request", "cwd") != cwd || fakeproc.Str(claim, "request", "permission_mode") != "acceptEdits" ||
 		fakeproc.Str(claim, "request", "sdk_mcp_servers", 0) != "host" || fakeproc.Get(claim, "request", "include_initialize") != true ||

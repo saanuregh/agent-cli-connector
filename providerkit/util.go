@@ -164,9 +164,11 @@ func CheckUpdatedInput(provider string, resp agent.PermissionResponse) error {
 	if len(resp.UpdatedInput) == 0 || resp.ProviderResponse != nil {
 		return nil
 	}
+	//exhaustive:enforce
 	switch resp.Decision {
 	case agent.DecisionDeny, agent.DecisionCancel:
 		return nil
+	case agent.DecisionAllow, agent.DecisionAllowSession, agent.DecisionAllowAlways:
 	}
 	return Unsupported(provider, "PermissionResponse.UpdatedInput")
 }

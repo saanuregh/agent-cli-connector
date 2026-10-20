@@ -246,6 +246,7 @@ func (r *PermissionRequest) RequestID() string { return r.ID }
 // allowing decision that r.Decisions does not offer.
 func (r *PermissionRequest) Respond(ctx context.Context, resp PermissionResponse) error {
 	if resp.ProviderResponse == nil {
+		//exhaustive:enforce
 		switch resp.Decision {
 		case DecisionDeny, DecisionCancel:
 		case DecisionAllow, DecisionAllowSession, DecisionAllowAlways:

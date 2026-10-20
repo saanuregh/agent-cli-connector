@@ -28,6 +28,10 @@ jobs:
       - name: staticcheck
         if: runner.os == 'Linux'
         run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 -checks all ./...
+      # Only switches marked //exhaustive:enforce are checked.
+      - name: exhaustive
+        if: runner.os == 'Linux'
+        run: go run github.com/nishanths/exhaustive/cmd/exhaustive@v0.15.0 -e ./...
       # The live tests need the real CLIs and accounts, so CI runs the
       # tests against the scripted fake harnesses only.
       - name: test

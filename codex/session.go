@@ -81,21 +81,7 @@ func (s *Session) loadSkills() {
 	if cwd := s.Info().Cwd; cwd != "" {
 		params["cwds"] = []string{cwd}
 	}
-	var resp struct {
-		Data []struct {
-			Skills []struct {
-				Name             string `json:"name"`
-				Description      string `json:"description"`
-				ShortDescription string `json:"shortDescription"`
-				Enabled          bool   `json:"enabled"`
-				Path             string `json:"path"`
-				Scope            string `json:"scope"`
-				Interface        *struct {
-					ShortDescription string `json:"shortDescription"`
-				} `json:"interface"`
-			} `json:"skills"`
-		} `json:"data"`
-	}
+	var resp skillsListResponse
 	if err := s.client.Call(ctx, "skills/list", params, &resp); err != nil {
 		s.rt.Logger().Debug("listing skills failed", "error", err)
 		return
@@ -253,9 +239,7 @@ func modeOf(approval, sandbox json.RawMessage) agent.PermissionMode {
 	if json.Unmarshal(approval, &policy) != nil {
 		return ""
 	}
-	var box struct {
-		Type string `json:"type"`
-	}
+	var box sandboxPolicyType
 	_ = json.Unmarshal(sandbox, &box)
 	switch {
 	case policy == "on-request" && box.Type == "readOnly":
@@ -326,6 +310,7 @@ func isNotArchivedError(err error) bool {
 // permissionSettings maps a uniform permission mode to an approval policy,
 // sandbox mode, and reviewer.
 func permissionSettings(mode agent.PermissionMode) (approval any, sandbox, reviewer string) {
+	//exhaustive:enforce
 	switch mode {
 	case "":
 		return nil, "", ""
@@ -415,16 +400,7 @@ func (s *Session) resolveSandbox(ctx context.Context, mode string) map[string]an
 func (s *Session) configuredWorkspaceWrite(ctx context.Context) map[string]any {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	var resp struct {
-		Config struct {
-			WorkspaceWrite *struct {
-				WritableRoots       []string `json:"writable_roots"`
-				NetworkAccess       bool     `json:"network_access"`
-				ExcludeSlashTmp     bool     `json:"exclude_slash_tmp"`
-				ExcludeTmpdirEnvVar bool     `json:"exclude_tmpdir_env_var"`
-			} `json:"sandbox_workspace_write"`
-		} `json:"config"`
-	}
+	var resp configReadResponse
 	params := map[string]any{"includeLayers": false}
 	if cwd := s.Info().Cwd; cwd != "" {
 		params["cwd"] = cwd
@@ -712,9 +688,7 @@ func (s *Session) steer(ctx context.Context, in agent.Input, active string) (*ag
 	if err != nil {
 		return nil, err
 	}
-	var resp struct {
-		TurnID string `json:"turnId"`
-	}
+	var resp turnSteerResponse
 	if err := s.client.Call(ctx, "turn/steer", params, &resp); err != nil {
 		if isNoActiveTurn(err) {
 			return s.enqueue(in)
@@ -791,11 +765,7 @@ const startTimeout = time.Minute
 
 // startTurn calls turn/start for turn id, which holds the running slot.
 func (s *Session) startTurn(ctx context.Context, id string, in agent.Input) error {
-	var resp struct {
-		Turn struct {
-			ID string `json:"id"`
-		} `json:"turn"`
-	}
+	var resp turnStartResponse
 	params, err := s.turnParams(ctx, in)
 	if err == nil {
 		_, schema := params["outputSchema"]
@@ -1196,4 +1166,45 @@ func ignoredConfig(cfg agent.Config, owned, experimental bool) []string {
 		ignored = append(ignored, "Env on a shared app-server")
 	}
 	return ignored
+}
+
+type skillsListResponse struct {
+	Data []struct {
+		Skills []struct {
+			Name             string `json:"name"`
+			Description      string `json:"description"`
+			ShortDescription string `json:"shortDescription"`
+			Enabled          bool   `json:"enabled"`
+			Path             string `json:"path"`
+			Scope            string `json:"scope"`
+			Interface        *struct {
+				ShortDescription string `json:"shortDescription"`
+			} `json:"interface"`
+		} `json:"skills"`
+	} `json:"data"`
+}
+
+type sandboxPolicyType struct {
+	Type string `json:"type"`
+}
+
+type configReadResponse struct {
+	Config struct {
+		WorkspaceWrite *struct {
+			WritableRoots       []string `json:"writable_roots"`
+			NetworkAccess       bool     `json:"network_access"`
+			ExcludeSlashTmp     bool     `json:"exclude_slash_tmp"`
+			ExcludeTmpdirEnvVar bool     `json:"exclude_tmpdir_env_var"`
+		} `json:"sandbox_workspace_write"`
+	} `json:"config"`
+}
+
+type turnSteerResponse struct {
+	TurnID string `json:"turnId"`
+}
+
+type turnStartResponse struct {
+	Turn struct {
+		ID string `json:"id"`
+	} `json:"turn"`
 }

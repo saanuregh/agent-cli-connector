@@ -251,10 +251,7 @@ func (p *Provider) ListSessions(ctx context.Context, opts agent.ListSessionsOpti
 			if cursor != "" {
 				params["cursor"] = cursor
 			}
-			var resp struct {
-				Data       []json.RawMessage `json:"data"`
-				NextCursor *string           `json:"nextCursor"`
-			}
+			var resp threadListResponse
 			if err := c.Call(ctx, "thread/list", params, &resp); err != nil {
 				return err
 			}
@@ -307,17 +304,7 @@ func (p *Provider) modelProvider() string {
 }
 
 func sessionSummary(raw json.RawMessage) (agent.SessionSummary, bool) {
-	var th struct {
-		ID              string  `json:"id"`
-		Name            *string `json:"name"`
-		Preview         string  `json:"preview"`
-		Cwd             string  `json:"cwd"`
-		CreatedAt       int64   `json:"createdAt"`
-		UpdatedAt       int64   `json:"updatedAt"`
-		Path            *string `json:"path"`
-		Model           *string `json:"model"`
-		ReasoningEffort *string `json:"reasoningEffort"`
-	}
+	var th threadSummaryWire
 	if json.Unmarshal(raw, &th) != nil || th.ID == "" {
 		return agent.SessionSummary{}, false
 	}
@@ -351,11 +338,7 @@ type historyTurn struct {
 }
 
 func readTurns(ctx context.Context, c *Client, threadID string) ([]historyTurn, error) {
-	var resp struct {
-		Thread struct {
-			Turns []historyTurn `json:"turns"`
-		} `json:"thread"`
-	}
+	var resp threadReadTurnsResponse
 	err := c.Call(ctx, "thread/read", map[string]any{"threadId": threadID, "includeTurns": true}, &resp)
 	return resp.Thread.Turns, err
 }
@@ -371,10 +354,7 @@ func readLatestTurns(ctx context.Context, c *Client, threadID string, want int) 
 		if cursor != "" {
 			params["cursor"] = cursor
 		}
-		var resp struct {
-			Data       []historyTurn `json:"data"`
-			NextCursor *string       `json:"nextCursor"`
-		}
+		var resp threadTurnsListHistoryResponse
 		if err := c.Call(ctx, "thread/turns/list", params, &resp); err != nil {
 			return nil, err
 		}
@@ -458,11 +438,7 @@ func endStoppedItem(it *agent.Item, turnStatus string) {
 // the history of its parent thread (sessionID when Codex does not name
 // one), or "" when that history does not name it.
 func spawnItem(ctx context.Context, c *Client, sessionID, subagent string) string {
-	var resp struct {
-		Thread struct {
-			ParentThreadID *string `json:"parentThreadId"`
-		} `json:"thread"`
-	}
+	var resp threadReadParentResponse
 	parent := sessionID
 	if c.Call(ctx, "thread/read", map[string]any{"threadId": subagent, "includeTurns": false}, &resp) == nil {
 		parent = cmp.Or(providerutil.Deref(resp.Thread.ParentThreadID), sessionID)
@@ -484,10 +460,7 @@ func spawnItem(ctx context.Context, c *Client, sessionID, subagent string) strin
 
 // itemTime returns an item's own timestamp, or its turn's time.
 func itemTime(raw json.RawMessage, kind agent.ItemKind, turn historyTurn) time.Time {
-	var f struct {
-		Timestamp json.RawMessage `json:"timestamp"`
-		CreatedAt json.RawMessage `json:"createdAt"`
-	}
+	var f itemTimestamps
 	_ = json.Unmarshal(raw, &f)
 	for _, v := range []json.RawMessage{f.Timestamp, f.CreatedAt} {
 		if t := parseTime(v); !t.IsZero() {
@@ -593,4 +566,43 @@ func (p *Provider) ListSubagents(ctx context.Context, sessionID string, _ agent.
 		out = append(out, tasks[id].Clone())
 	}
 	return out, err
+}
+
+type threadListResponse struct {
+	Data       []json.RawMessage `json:"data"`
+	NextCursor *string           `json:"nextCursor"`
+}
+
+type threadSummaryWire struct {
+	ID              string  `json:"id"`
+	Name            *string `json:"name"`
+	Preview         string  `json:"preview"`
+	Cwd             string  `json:"cwd"`
+	CreatedAt       int64   `json:"createdAt"`
+	UpdatedAt       int64   `json:"updatedAt"`
+	Path            *string `json:"path"`
+	Model           *string `json:"model"`
+	ReasoningEffort *string `json:"reasoningEffort"`
+}
+
+type threadReadTurnsResponse struct {
+	Thread struct {
+		Turns []historyTurn `json:"turns"`
+	} `json:"thread"`
+}
+
+type threadTurnsListHistoryResponse struct {
+	Data       []historyTurn `json:"data"`
+	NextCursor *string       `json:"nextCursor"`
+}
+
+type threadReadParentResponse struct {
+	Thread struct {
+		ParentThreadID *string `json:"parentThreadId"`
+	} `json:"thread"`
+}
+
+type itemTimestamps struct {
+	Timestamp json.RawMessage `json:"timestamp"`
+	CreatedAt json.RawMessage `json:"createdAt"`
 }

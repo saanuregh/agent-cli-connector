@@ -120,12 +120,7 @@ func (s *Session) Review(ctx context.Context, target ReviewTarget) (*agent.Turn,
 	params := map[string]any{"threadId": s.ID(), "target": target, "delivery": "inline"}
 	id := provisionalID()
 	turn, ok, err := s.rt.StartIdle(ctx, id, func(ctx context.Context) error {
-		var resp struct {
-			Turn struct {
-				ID string `json:"id"`
-			} `json:"turn"`
-			ReviewThreadID string `json:"reviewThreadId"`
-		}
+		var resp reviewStartResponse
 		// Like turn/start, the call is not abandoned once sent: Codex may
 		// already run the review, and a later start could be mistaken for it.
 		callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), startTimeout)
@@ -177,11 +172,7 @@ func (s *Session) Rewind(ctx context.Context, turnID string) error {
 // historyMode returns the thread's persisted history contract,
 // "paginated" or "legacy".
 func (s *Session) historyMode(ctx context.Context) (string, error) {
-	var resp struct {
-		Thread struct {
-			HistoryMode string `json:"historyMode"`
-		} `json:"thread"`
-	}
+	var resp threadReadHistoryResponse
 	if err := s.threadCall(ctx, "thread/read", map[string]any{"threadId": s.ID(), "includeTurns": false}, &resp); err != nil {
 		return "", err
 	}
@@ -274,25 +265,13 @@ func (s *Session) ListTurns(ctx context.Context, opts ListTurnsOptions) (*TurnPa
 	if opts.ItemsView != "" {
 		params["itemsView"] = opts.ItemsView
 	}
-	var resp struct {
-		Data            []json.RawMessage `json:"data"`
-		NextCursor      *string           `json:"nextCursor"`
-		BackwardsCursor *string           `json:"backwardsCursor"`
-	}
+	var resp threadTurnsListResponse
 	if err := s.threadCall(ctx, "thread/turns/list", params, &resp); err != nil {
 		return nil, err
 	}
 	page := &TurnPage{NextCursor: providerutil.Deref(resp.NextCursor), BackwardsCursor: providerutil.Deref(resp.BackwardsCursor)}
 	for _, raw := range resp.Data {
-		var w struct {
-			ID          string            `json:"id"`
-			Status      string            `json:"status"`
-			Error       *wireTurnError    `json:"error"`
-			StartedAt   *int64            `json:"startedAt"`
-			CompletedAt *int64            `json:"completedAt"`
-			DurationMS  *int64            `json:"durationMs"`
-			Items       []json.RawMessage `json:"items"`
-		}
+		var w turnWire
 		if json.Unmarshal(raw, &w) != nil {
 			continue
 		}
@@ -338,9 +317,7 @@ func (s *Session) ReadThread(ctx context.Context, includeTurns bool) (json.RawMe
 
 // Goal returns the thread goal, or nil when none is set.
 func (s *Session) Goal(ctx context.Context) (*agent.Goal, error) {
-	var resp struct {
-		Goal *goalWire `json:"goal"`
-	}
+	var resp threadGoalGetResponse
 	if err := s.threadCall(ctx, "thread/goal/get", map[string]any{"threadId": s.ID()}, &resp); err != nil || resp.Goal == nil {
 		return nil, err
 	}
@@ -397,10 +374,7 @@ func (s *Session) Unarchive(ctx context.Context) error {
 // model-specific ones, each with LimitID set. Later rate-limit updates are
 // merged into this snapshot.
 func (s *Session) RateLimits(ctx context.Context) ([]agent.RateLimit, error) {
-	var resp struct {
-		RateLimits map[string]json.RawMessage            `json:"rateLimits"`
-		ByLimitID  map[string]map[string]json.RawMessage `json:"rateLimitsByLimitId"`
-	}
+	var resp rateLimitsReadResponse
 	if err := s.threadCall(ctx, "account/rateLimits/read", nil, &resp); err != nil {
 		return nil, err
 	}
@@ -519,9 +493,7 @@ func listPages[T any](ctx context.Context, call func(ctx context.Context, method
 // TerminateBackgroundTerminal stops one background terminal, identified
 // by its processId. It reports whether a process was stopped.
 func (s *Session) TerminateBackgroundTerminal(ctx context.Context, processID string) (bool, error) {
-	var resp struct {
-		Terminated bool `json:"terminated"`
-	}
+	var resp terminateBackgroundTerminalResponse
 	err := s.threadCall(ctx, "thread/backgroundTerminals/terminate", map[string]any{"threadId": s.ID(), "processId": processID}, &resp)
 	return resp.Terminated, err
 }
@@ -567,22 +539,7 @@ func (c *Client) ListModels(ctx context.Context, includeHidden bool) ([]agent.Mo
 	raws, err := listPages[json.RawMessage](ctx, c.Call, "model/list", map[string]any{"includeHidden": includeHidden})
 	var out []agent.Model
 	for _, raw := range raws {
-		var m struct {
-			ID                        string `json:"id"`
-			Model                     string `json:"model"`
-			DisplayName               string `json:"displayName"`
-			Description               string `json:"description"`
-			IsDefault                 bool   `json:"isDefault"`
-			DefaultReasoningEffort    string `json:"defaultReasoningEffort"`
-			SupportedReasoningEfforts []struct {
-				ReasoningEffort string `json:"reasoningEffort"`
-			} `json:"supportedReasoningEfforts"`
-			ServiceTiers []struct {
-				ID string `json:"id"`
-			} `json:"serviceTiers"`
-			AdditionalSpeedTiers []string `json:"additionalSpeedTiers"`
-			DefaultServiceTier   *string  `json:"defaultServiceTier"`
-		}
+		var m modelWire
 		if json.Unmarshal(raw, &m) != nil {
 			continue
 		}
@@ -623,9 +580,7 @@ func (c *Client) RateLimits(ctx context.Context) (json.RawMessage, error) {
 // idempotencyKey when retrying the same attempt. The outcome is "reset",
 // "nothingToReset", "noCredit", or "alreadyRedeemed".
 func (c *Client) ConsumeRateLimitResetCredit(ctx context.Context, idempotencyKey string) (string, error) {
-	var resp struct {
-		Outcome string `json:"outcome"`
-	}
+	var resp rateLimitResetCreditResponse
 	err := c.Call(ctx, "account/rateLimitResetCredit/consume", map[string]any{"idempotencyKey": idempotencyKey}, &resp)
 	return resp.Outcome, err
 }
@@ -652,14 +607,7 @@ func (c *Client) AuthStatus(ctx context.Context) (*agent.AuthStatus, error) {
 	if err != nil {
 		return nil, err
 	}
-	var resp struct {
-		Account *struct {
-			Type     string  `json:"type"`
-			Email    *string `json:"email"`
-			PlanType *string `json:"planType"`
-		} `json:"account"`
-		RequiresOpenaiAuth bool `json:"requiresOpenaiAuth"`
-	}
+	var resp accountReadResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, fmt.Errorf("codex: decode account/read: %w", err)
 	}
@@ -756,4 +704,76 @@ func (c *Client) ExecCommand(ctx context.Context, params map[string]any) (json.R
 // FuzzyFileSearch searches file names under roots.
 func (c *Client) FuzzyFileSearch(ctx context.Context, query string, roots []string) (json.RawMessage, error) {
 	return c.CallRaw(ctx, "fuzzyFileSearch", map[string]any{"query": query, "roots": roots})
+}
+
+type reviewStartResponse struct {
+	Turn struct {
+		ID string `json:"id"`
+	} `json:"turn"`
+	ReviewThreadID string `json:"reviewThreadId"`
+}
+
+type threadReadHistoryResponse struct {
+	Thread struct {
+		HistoryMode string `json:"historyMode"`
+	} `json:"thread"`
+}
+
+type threadTurnsListResponse struct {
+	Data            []json.RawMessage `json:"data"`
+	NextCursor      *string           `json:"nextCursor"`
+	BackwardsCursor *string           `json:"backwardsCursor"`
+}
+
+type turnWire struct {
+	ID          string            `json:"id"`
+	Status      string            `json:"status"`
+	Error       *wireTurnError    `json:"error"`
+	StartedAt   *int64            `json:"startedAt"`
+	CompletedAt *int64            `json:"completedAt"`
+	DurationMS  *int64            `json:"durationMs"`
+	Items       []json.RawMessage `json:"items"`
+}
+
+type threadGoalGetResponse struct {
+	Goal *goalWire `json:"goal"`
+}
+
+type rateLimitsReadResponse struct {
+	RateLimits map[string]json.RawMessage            `json:"rateLimits"`
+	ByLimitID  map[string]map[string]json.RawMessage `json:"rateLimitsByLimitId"`
+}
+
+type terminateBackgroundTerminalResponse struct {
+	Terminated bool `json:"terminated"`
+}
+
+type modelWire struct {
+	ID                        string `json:"id"`
+	Model                     string `json:"model"`
+	DisplayName               string `json:"displayName"`
+	Description               string `json:"description"`
+	IsDefault                 bool   `json:"isDefault"`
+	DefaultReasoningEffort    string `json:"defaultReasoningEffort"`
+	SupportedReasoningEfforts []struct {
+		ReasoningEffort string `json:"reasoningEffort"`
+	} `json:"supportedReasoningEfforts"`
+	ServiceTiers []struct {
+		ID string `json:"id"`
+	} `json:"serviceTiers"`
+	AdditionalSpeedTiers []string `json:"additionalSpeedTiers"`
+	DefaultServiceTier   *string  `json:"defaultServiceTier"`
+}
+
+type rateLimitResetCreditResponse struct {
+	Outcome string `json:"outcome"`
+}
+
+type accountReadResponse struct {
+	Account *struct {
+		Type     string  `json:"type"`
+		Email    *string `json:"email"`
+		PlanType *string `json:"planType"`
+	} `json:"account"`
+	RequiresOpenaiAuth bool `json:"requiresOpenaiAuth"`
 }

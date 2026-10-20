@@ -100,7 +100,11 @@ func TestInterruptEndsRunningItemsAndStopsSubagents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sess.Close()
+	defer func() {
+		sess.Close()
+		for range sess.Events() {
+		}
+	}()
 	turn, err := sess.Send(ctx, agent.Text("go"))
 	if err != nil {
 		t.Fatal(err)
@@ -298,7 +302,11 @@ func TestTurnOptionsAsyncQuestionsAndContextRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sess.Close()
+	defer func() {
+		sess.Close()
+		for range sess.Events() {
+		}
+	}()
 	_, err = sess.Send(ctx, agent.Input{Parts: []agent.Part{agent.TextPart("go")}, ProviderOptions: codex.TurnOptions{
 		ApprovalPolicy: "never", SandboxPolicy: "read-only", ApprovalsReviewer: "user", Cwd: "/x", StickyServiceTier: "fast",
 		AdditionalContext: map[string]any{

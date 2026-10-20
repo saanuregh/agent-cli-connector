@@ -45,7 +45,11 @@ func TestEventsAndTurnEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sess.Close()
+	defer func() {
+		sess.Close()
+		for range sess.Events() {
+		}
+	}()
 	if _, ok := (<-sess.Events()).(*agent.SessionStarted); !ok {
 		t.Fatal("first event is not SessionStarted")
 	}
