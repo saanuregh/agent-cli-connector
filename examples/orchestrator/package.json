@@ -1,0 +1,20 @@
+{
+  "name": "agent-cli-connector-orchestrator",
+  "private": true,
+  "description": "A planner splits a task, workers on several harnesses research it in parallel, and the planner merges their reports",
+  "type": "module",
+  "engines": {
+    "node": ">=23.6"
+  },
+  "scripts": {
+    "start": "node main.ts",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "agent-cli-connector": "file:../../bindings/typescript"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2"
+  }
+}
