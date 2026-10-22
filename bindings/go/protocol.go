@@ -4,6 +4,10 @@ package agent
 
 import "encoding/json"
 
+// LibraryVersion is the library version these bindings were generated
+// from; release files are downloaded for it.
+const LibraryVersion = "0.2.0"
+
 // JSON-RPC method names: client requests, notifications, and requests to the client.
 const (
 	MethodInitialize               = "initialize"

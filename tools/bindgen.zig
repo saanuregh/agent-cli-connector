@@ -1264,6 +1264,7 @@ fn quotedTags(comptime tags: []const [:0]const u8) []const []const u8 {
 fn emitTypeScript(w: *Writer) Writer.Error!void {
     @setEvalBranchQuota(1_000_000);
     try w.writeAll(comptime "// " ++ header ++ "\n\n");
+    try w.writeAll(comptime "/** The library version these bindings were generated from; release files are downloaded for it. */\nexport const LIBRARY_VERSION = " ++ quote(rpc.library_version) ++ ";\n\n");
     try w.writeAll(comptime "/** Client requests: method name to params and result. */\nexport interface Methods {\n");
     inline for (methods) |m| try w.writeAll(comptime "  " ++ quote(m.name) ++ ": { params: " ++ tsRef(m.Params) ++ "; result: " ++ tsRef(m.Result) ++ " };\n");
     try w.writeAll(comptime "}\n\n/** Notifications from the library: method name to params. */\nexport interface Notifications {\n");
@@ -1451,6 +1452,7 @@ fn emitGo(w: *Writer) Writer.Error!void {
     @setEvalBranchQuota(1_000_000);
     try w.writeAll(comptime "// " ++ header ++ "\n\n");
     try w.writeAll(comptime "package agent\n\nimport \"encoding/json\"\n\n");
+    try w.writeAll(comptime "// LibraryVersion is the library version these bindings were generated\n// from; release files are downloaded for it.\nconst LibraryVersion = " ++ quote(rpc.library_version) ++ "\n\n");
     try w.writeAll(comptime "// JSON-RPC method names: client requests, notifications, and requests to the client.\n");
     const names = comptime blk: {
         var out: []const []const u8 = &.{};
@@ -1713,6 +1715,7 @@ fn rustEnum(w: *Writer, comptime name: []const u8, comptime E: type) !void {
 fn emitRust(w: *Writer) Writer.Error!void {
     @setEvalBranchQuota(1_000_000);
     try w.writeAll(comptime "// " ++ header ++ "\n\n");
+    try w.writeAll(comptime "/// The library version these bindings were generated from; release files\n/// are downloaded for it.\npub const LIBRARY_VERSION: &str = " ++ quote(rpc.library_version) ++ ";\n\n");
     try w.writeAll(
         \\use serde::{Deserialize, Serialize};
         \\use std::borrow::Cow;

@@ -84,3 +84,9 @@ for (const transport of ["native", "agentd"] as const) {
     });
   });
 }
+
+test("the package version names the release it downloads", async () => {
+  const { LIBRARY_VERSION } = await import("../src/index.ts");
+  const pkg = JSON.parse(await (await import("node:fs/promises")).readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(pkg.version, LIBRARY_VERSION);
+});
