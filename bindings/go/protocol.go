@@ -6,7 +6,7 @@ import "encoding/json"
 
 // LibraryVersion is the library version these bindings were generated
 // from; release files are downloaded for it.
-const LibraryVersion = "0.2.0"
+const LibraryVersion = "0.3.0"
 
 // JSON-RPC method names: client requests, notifications, and requests to the client.
 const (
@@ -17,11 +17,13 @@ const (
 	MethodProviderReadHistory      = "provider/readHistory"
 	MethodProviderDeleteSession    = "provider/deleteSession"
 	MethodProviderListSubagents    = "provider/listSubagents"
+	MethodProviderCall             = "provider/call"
 	MethodSessionStart             = "session/start"
 	MethodSessionFork              = "session/fork"
 	MethodSessionSend              = "session/send"
 	MethodSessionWait              = "session/wait"
 	MethodSessionInfo              = "session/info"
+	MethodSessionState             = "session/state"
 	MethodSessionInterrupt         = "session/interrupt"
 	MethodSessionInterruptTurn     = "session/interruptTurn"
 	MethodSessionSetModel          = "session/setModel"
@@ -98,44 +100,53 @@ type ProviderInfo struct {
 }
 
 type Capabilities struct {
-	Streaming        bool             `json:"streaming,omitempty"`
-	ReasoningStream  bool             `json:"reasoning_stream,omitempty"`
-	Images           bool             `json:"images,omitempty"`
-	Steer            bool             `json:"steer,omitempty"`
-	Queue            bool             `json:"queue,omitempty"`
-	Interrupt        bool             `json:"interrupt,omitempty"`
-	InterruptTurn    bool             `json:"interrupt_turn,omitempty"`
-	SetModel         bool             `json:"set_model,omitempty"`
-	SetEffort        bool             `json:"set_effort,omitempty"`
-	PermissionModes  []PermissionMode `json:"permission_modes,omitempty"`
-	PermissionPrompt bool             `json:"permission_prompt,omitempty"`
-	UserQuestions    bool             `json:"user_questions,omitempty"`
-	Elicitation      bool             `json:"elicitation,omitempty"`
-	HostTools        bool             `json:"host_tools,omitempty"`
-	McpServers       bool             `json:"mcp_servers,omitempty"`
-	ResumeSession    bool             `json:"resume_session,omitempty"`
-	Fork             bool             `json:"fork,omitempty"`
-	ForkAtTurn       bool             `json:"fork_at_turn,omitempty"`
-	Rewind           bool             `json:"rewind,omitempty"`
-	Compact          bool             `json:"compact,omitempty"`
-	SetTitle         bool             `json:"set_title,omitempty"`
-	StopTask         bool             `json:"stop_task,omitempty"`
-	ReadRateLimits   bool             `json:"read_rate_limits,omitempty"`
-	SystemPrompt     bool             `json:"system_prompt,omitempty"`
-	OutputSchema     bool             `json:"output_schema,omitempty"`
-	Plans            bool             `json:"plans,omitempty"`
-	Tasks            bool             `json:"tasks,omitempty"`
-	Subagents        bool             `json:"subagents,omitempty"`
-	CostReporting    bool             `json:"cost_reporting,omitempty"`
-	RateLimits       bool             `json:"rate_limits,omitempty"`
-	Hooks            bool             `json:"hooks,omitempty"`
-	Goals            bool             `json:"goals,omitempty"`
-	Check            bool             `json:"check,omitempty"`
-	ListModels       bool             `json:"list_models,omitempty"`
-	ListSessions     bool             `json:"list_sessions,omitempty"`
-	ReadHistory      bool             `json:"read_history,omitempty"`
-	DeleteSession    bool             `json:"delete_session,omitempty"`
-	ListSubagents    bool             `json:"list_subagents,omitempty"`
+	Streaming              bool             `json:"streaming,omitempty"`
+	ReasoningStream        bool             `json:"reasoning_stream,omitempty"`
+	Images                 bool             `json:"images,omitempty"`
+	Steer                  bool             `json:"steer,omitempty"`
+	Queue                  bool             `json:"queue,omitempty"`
+	Interrupt              bool             `json:"interrupt,omitempty"`
+	InterruptTurn          bool             `json:"interrupt_turn,omitempty"`
+	SetModel               bool             `json:"set_model,omitempty"`
+	SetEffort              bool             `json:"set_effort,omitempty"`
+	PermissionModes        []PermissionMode `json:"permission_modes,omitempty"`
+	PermissionPrompt       bool             `json:"permission_prompt,omitempty"`
+	UserQuestions          bool             `json:"user_questions,omitempty"`
+	Elicitation            bool             `json:"elicitation,omitempty"`
+	HostTools              bool             `json:"host_tools,omitempty"`
+	McpServers             bool             `json:"mcp_servers,omitempty"`
+	ResumeSession          bool             `json:"resume_session,omitempty"`
+	Fork                   bool             `json:"fork,omitempty"`
+	ForkAtTurn             bool             `json:"fork_at_turn,omitempty"`
+	Rewind                 bool             `json:"rewind,omitempty"`
+	Compact                bool             `json:"compact,omitempty"`
+	SetTitle               bool             `json:"set_title,omitempty"`
+	StopTask               bool             `json:"stop_task,omitempty"`
+	ReadRateLimits         bool             `json:"read_rate_limits,omitempty"`
+	SystemPrompt           bool             `json:"system_prompt,omitempty"`
+	OutputSchema           bool             `json:"output_schema,omitempty"`
+	Plans                  bool             `json:"plans,omitempty"`
+	Tasks                  bool             `json:"tasks,omitempty"`
+	Subagents              bool             `json:"subagents,omitempty"`
+	CostReporting          bool             `json:"cost_reporting,omitempty"`
+	RateLimits             bool             `json:"rate_limits,omitempty"`
+	Hooks                  bool             `json:"hooks,omitempty"`
+	Goals                  bool             `json:"goals,omitempty"`
+	ToolOutputStream       bool             `json:"tool_output_stream,omitempty"`
+	PlanStream             bool             `json:"plan_stream,omitempty"`
+	RewindChangesSessionID bool             `json:"rewind_changes_session_id,omitempty"`
+	RequestsFromSubagents  bool             `json:"requests_from_subagents,omitempty"`
+	BackgroundTurns        bool             `json:"background_turns,omitempty"`
+	SteerInterruptsTools   bool             `json:"steer_interrupts_tools,omitempty"`
+	Dialogs                bool             `json:"dialogs,omitempty"`
+	NativeRequests         bool             `json:"native_requests,omitempty"`
+	Check                  bool             `json:"check,omitempty"`
+	ListModels             bool             `json:"list_models,omitempty"`
+	ListSessions           bool             `json:"list_sessions,omitempty"`
+	ReadHistory            bool             `json:"read_history,omitempty"`
+	DeleteSession          bool             `json:"delete_session,omitempty"`
+	ListSubagents          bool             `json:"list_subagents,omitempty"`
+	ProviderCall           bool             `json:"provider_call,omitempty"`
 }
 
 type ProviderParams struct {
@@ -178,6 +189,12 @@ type ListSubagentsParams struct {
 	Cwd       string `json:"cwd,omitempty"`
 }
 
+type ProviderCallParams struct {
+	Provider string          `json:"provider"`
+	Method   string          `json:"method"`
+	Params   json.RawMessage `json:"params,omitempty"`
+}
+
 type StartParams struct {
 	Provider string `json:"provider"`
 	Config   Config `json:"config,omitzero"`
@@ -205,6 +222,7 @@ type Config struct {
 	AdditionalDirectories []string             `json:"additional_directories,omitempty"`
 	Env                   map[string]string    `json:"env,omitempty"`
 	UnsetEnv              []string             `json:"unset_env,omitempty"`
+	CommandPrefix         []string             `json:"command_prefix,omitempty"`
 	EventBufferLimit      int64                `json:"event_buffer_limit,omitempty"`
 	WireTap               bool                 `json:"wire_tap,omitempty"`
 	IncludeRaw            bool                 `json:"include_raw,omitempty"`
@@ -273,6 +291,7 @@ type SessionInfo struct {
 	Tools          []string          `json:"tools,omitempty"`
 	Commands       []SlashCommand    `json:"commands,omitempty"`
 	McpServers     []McpServerStatus `json:"mcp_servers,omitempty"`
+	ContextWindow  int64             `json:"context_window,omitempty"`
 	Raw            json.RawMessage   `json:"raw,omitempty"`
 }
 
@@ -426,6 +445,8 @@ type RespondParams struct {
 	Permission  *PermissionResponse  `json:"permission,omitempty"`
 	UserInput   *UserInputResponse   `json:"user_input,omitempty"`
 	Elicitation *ElicitationResponse `json:"elicitation,omitempty"`
+	Dialog      *DialogResponse      `json:"dialog,omitempty"`
+	Native      *NativeResponse      `json:"native,omitempty"`
 }
 
 type PermissionResponse struct {
@@ -486,6 +507,50 @@ const (
 	ElicitationResponseActionCancel  ElicitationResponseAction = "cancel"
 )
 
+type DialogResponse struct {
+	Behavior DialogResponseBehavior `json:"behavior,omitempty"`
+	Result   json.RawMessage        `json:"result,omitempty"`
+}
+
+// UnmarshalJSON applies the protocol defaults to missing fields.
+func (x *DialogResponse) UnmarshalJSON(data []byte) error {
+	type plain DialogResponse
+	p := plain{Behavior: DialogResponseBehaviorCancelled}
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	*x = DialogResponse(p)
+	return nil
+}
+
+type DialogResponseBehavior string
+
+const (
+	DialogResponseBehaviorCompleted DialogResponseBehavior = "completed"
+	DialogResponseBehaviorCancelled DialogResponseBehavior = "cancelled"
+)
+
+type NativeResponse struct {
+	Result json.RawMessage      `json:"result,omitempty"`
+	Error  *NativeResponseError `json:"error,omitempty"`
+}
+
+type NativeResponseError struct {
+	Code    int64  `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+// UnmarshalJSON applies the protocol defaults to missing fields.
+func (x *NativeResponseError) UnmarshalJSON(data []byte) error {
+	type plain NativeResponseError
+	p := plain{Code: -32603}
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	*x = NativeResponseError(p)
+	return nil
+}
+
 type EventNotification struct {
 	Session string `json:"session"`
 	Event   Event  `json:"event"`
@@ -532,11 +597,14 @@ const (
 	EventTypePermissionRequest  EventType = "permission_request"
 	EventTypeUserInputRequest   EventType = "user_input_request"
 	EventTypeElicitationRequest EventType = "elicitation_request"
+	EventTypeDialogRequest      EventType = "dialog_request"
+	EventTypeNativeRequest      EventType = "native_request"
 	EventTypeRequestResolved    EventType = "request_resolved"
 	EventTypeRateLimitUpdated   EventType = "rate_limit_updated"
 	EventTypeHookRun            EventType = "hook_run"
 	EventTypeGoalUpdated        EventType = "goal_updated"
 	EventTypeConversationReset  EventType = "conversation_reset"
+	EventTypeSessionIDChanged   EventType = "session_id_changed"
 	EventTypeItemsRemoved       EventType = "items_removed"
 	EventTypeEventsDropped      EventType = "events_dropped"
 	EventTypeNative             EventType = "native"
@@ -570,11 +638,14 @@ func (Notice) EventType() EventType             { return EventTypeNotice }
 func (PermissionRequest) EventType() EventType  { return EventTypePermissionRequest }
 func (UserInputRequest) EventType() EventType   { return EventTypeUserInputRequest }
 func (ElicitationRequest) EventType() EventType { return EventTypeElicitationRequest }
+func (DialogRequest) EventType() EventType      { return EventTypeDialogRequest }
+func (NativeRequest) EventType() EventType      { return EventTypeNativeRequest }
 func (RequestResolved) EventType() EventType    { return EventTypeRequestResolved }
 func (RateLimitUpdated) EventType() EventType   { return EventTypeRateLimitUpdated }
 func (HookRun) EventType() EventType            { return EventTypeHookRun }
 func (GoalUpdated) EventType() EventType        { return EventTypeGoalUpdated }
 func (ConversationReset) EventType() EventType  { return EventTypeConversationReset }
+func (SessionIdChanged) EventType() EventType   { return EventTypeSessionIDChanged }
 func (ItemsRemoved) EventType() EventType       { return EventTypeItemsRemoved }
 func (EventsDropped) EventType() EventType      { return EventTypeEventsDropped }
 func (Native) EventType() EventType             { return EventTypeNative }
@@ -720,6 +791,14 @@ func decodeEventPayload(t EventType, data []byte) (EventPayload, error) {
 		var p ElicitationRequest
 		err := json.Unmarshal(data, &p)
 		return p, err
+	case EventTypeDialogRequest:
+		var p DialogRequest
+		err := json.Unmarshal(data, &p)
+		return p, err
+	case EventTypeNativeRequest:
+		var p NativeRequest
+		err := json.Unmarshal(data, &p)
+		return p, err
 	case EventTypeRequestResolved:
 		var p RequestResolved
 		err := json.Unmarshal(data, &p)
@@ -738,6 +817,10 @@ func decodeEventPayload(t EventType, data []byte) (EventPayload, error) {
 		return p, err
 	case EventTypeConversationReset:
 		var p ConversationReset
+		err := json.Unmarshal(data, &p)
+		return p, err
+	case EventTypeSessionIDChanged:
+		var p SessionIdChanged
 		err := json.Unmarshal(data, &p)
 		return p, err
 	case EventTypeItemsRemoved:
@@ -783,7 +866,11 @@ const (
 	SessionStatusWaiting    SessionStatus = "waiting"
 )
 
-type TurnStarted struct{}
+type TurnStarted struct {
+	NativeTurnID string `json:"native_turn_id,omitempty"`
+	Origin       string `json:"origin,omitempty"`
+	ClientID     string `json:"client_id,omitempty"`
+}
 
 type TurnCompleted struct {
 	Result TurnResult `json:"result"`
@@ -1360,6 +1447,21 @@ func (x *ElicitationRequest) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type DialogRequest struct {
+	ID         string          `json:"id,omitempty"`
+	Kind       string          `json:"kind,omitempty"`
+	Data       json.RawMessage `json:"data,omitempty"`
+	ToolUseID  string          `json:"tool_use_id,omitempty"`
+	SubagentID string          `json:"subagent_id,omitempty"`
+}
+
+type NativeRequest struct {
+	ID         string          `json:"id,omitempty"`
+	Method     string          `json:"method,omitempty"`
+	Params     json.RawMessage `json:"params,omitempty"`
+	SubagentID string          `json:"subagent_id,omitempty"`
+}
+
 type RequestResolved struct {
 	RequestID string         `json:"request_id"`
 	Kind      RequestKind    `json:"kind"`
@@ -1372,6 +1474,8 @@ const (
 	RequestKindPermission  RequestKind = "permission"
 	RequestKindUserInput   RequestKind = "user_input"
 	RequestKindElicitation RequestKind = "elicitation"
+	RequestKindDialog      RequestKind = "dialog"
+	RequestKindNative      RequestKind = "native"
 )
 
 type RequestOutcome string
@@ -1463,6 +1567,31 @@ type ConversationReset struct {
 	Trigger      string `json:"trigger,omitempty"`
 	NewSessionID string `json:"new_session_id,omitempty"`
 }
+
+type SessionIdChanged struct {
+	PreviousID string                 `json:"previous_id,omitempty"`
+	ID         string                 `json:"id,omitempty"`
+	Reason     SessionIdChangedReason `json:"reason,omitempty"`
+}
+
+// UnmarshalJSON applies the protocol defaults to missing fields.
+func (x *SessionIdChanged) UnmarshalJSON(data []byte) error {
+	type plain SessionIdChanged
+	p := plain{Reason: SessionIdChangedReasonReset}
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	*x = SessionIdChanged(p)
+	return nil
+}
+
+type SessionIdChangedReason string
+
+const (
+	SessionIdChangedReasonReset  SessionIdChangedReason = "reset"
+	SessionIdChangedReasonRewind SessionIdChangedReason = "rewind"
+	SessionIdChangedReasonResume SessionIdChangedReason = "resume"
+)
 
 type ItemsRemoved struct {
 	Ids []string `json:"ids,omitempty"`
@@ -1588,6 +1717,7 @@ type ClaudeSessionOptions struct {
 	NoPermissionPrompts        bool            `json:"no_permission_prompts,omitempty"`
 	AllowBypassPermissions     bool            `json:"allow_bypass_permissions,omitempty"`
 	ToolConfig                 json.RawMessage `json:"tool_config,omitempty"`
+	SupportedDialogKinds       []string        `json:"supported_dialog_kinds,omitempty"`
 	ToolServerName             string          `json:"tool_server_name,omitempty"`
 	ToolTimeoutMs              int64           `json:"tool_timeout_ms,omitempty"`
 	Debug                      bool            `json:"debug,omitempty"`
@@ -1624,6 +1754,7 @@ type CodexOptions struct {
 	Enable                 []string          `json:"enable,omitempty"`
 	Disable                []string          `json:"disable,omitempty"`
 	ExtraArgs              []string          `json:"extra_args,omitempty"`
+	CommandPrefix          []string          `json:"command_prefix,omitempty"`
 	StartupTimeoutMs       int64             `json:"startup_timeout_ms,omitempty"`
 	ShutdownGraceMs        int64             `json:"shutdown_grace_ms,omitempty"`
 	ClientName             string            `json:"client_name,omitempty"`
@@ -1746,6 +1877,34 @@ type SessionSummary struct {
 	FirstPrompt string          `json:"first_prompt,omitempty"`
 	LastPrompt  string          `json:"last_prompt,omitempty"`
 	Raw         json.RawMessage `json:"raw,omitempty"`
+}
+
+type SessionState struct {
+	Status          SessionStatus `json:"status,omitempty"`
+	RunningTurnID   string        `json:"running_turn_id,omitempty"`
+	QueuedTurnIds   []string      `json:"queued_turn_ids,omitempty"`
+	Tasks           []Task        `json:"tasks,omitempty"`
+	PendingRequests []Event       `json:"pending_requests,omitempty"`
+	Usage           Usage         `json:"usage,omitzero"`
+	Info            SessionInfo   `json:"info,omitzero"`
+	BackgroundWork  bool          `json:"background_work,omitempty"`
+}
+
+// UnmarshalJSON applies the protocol defaults to missing fields.
+func (x *SessionState) UnmarshalJSON(data []byte) error {
+	type plain SessionState
+	p := plain{Status: SessionStatusIdle}
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	*x = SessionState(p)
+	return nil
+}
+
+type RewindResult struct {
+	SessionID      string   `json:"session_id,omitempty"`
+	Forked         bool     `json:"forked,omitempty"`
+	RemovedItemIds []string `json:"removed_item_ids,omitempty"`
 }
 
 type ToolCancelParams struct {

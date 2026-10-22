@@ -1,5 +1,5 @@
-//! Permission prompts, AskUserQuestion, and MCP elicitations: CLI control
-//! requests that become host requests, and their answers. Also maps
+//! Permission prompts, AskUserQuestion, MCP elicitations, and dialogs: CLI
+//! control requests that become host requests, and their answers. Also maps
 //! permission mode names between the uniform and Claude forms.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -18,6 +18,7 @@ const eql = kit.eql;
 const decode = @import("decode.zig");
 const control = @import("control.zig");
 const ClaudeSession = @import("session.zig").ClaudeSession;
+const log = std.log.scoped(.agent);
 
 /// Turns a can_use_tool request into a permission request, or a user input
 /// request for AskUserQuestion. `request_bytes` (the request body) is kept to
@@ -122,6 +123,24 @@ pub fn handleElicitation(claude: *ClaudeSession, a: Allocator, id: []const u8, r
     } }, RawJson.of(line), "");
 }
 
+/// Turns a request_user_dialog of a kind the host declared into a dialog
+/// request. A kind the host did not declare must stay unanswered: the CLI
+/// discards an error answer, and "cancelled" would settle the dialog as
+/// dismissed for a client that may be its renderer.
+pub fn handleDialog(claude: *ClaudeSession, a: Allocator, id: []const u8, request: JsonView, request_bytes: []const u8, line: []const u8) !void {
+    const kind = request.str("dialog_kind");
+    if (!kit.contains(claude.opts.supported_dialog_kinds, kind)) {
+        log.info("claude: dialog {s} of undeclared kind \"{s}\" left unanswered", .{ id, kind });
+        return;
+    }
+    claude.rt().request(.{ .dialog_request = .{
+        .id = id,
+        .kind = kind,
+        .data = try request.get("payload").raw(a),
+        .tool_use_id = request.str("tool_use_id"),
+    } }, RawJson.of(line), request_bytes);
+}
+
 /// Answers a pending request natively (`Session.VTable.respond`).
 pub fn respond(s: *Session, pending: *const Session.Pending, response: types.Response, diag: ?*Diagnostics) errors.Error!void {
     const claude = ClaudeSession.of(s);
@@ -138,6 +157,13 @@ pub fn respond(s: *Session, pending: *const Session.Pending, response: types.Res
             if (answer.content) |content| try out.put("content", agent.json.valueOf(a, content) orelse .null);
             break :blk try agent.json.encodeValue(a, out.value());
         },
+        .dialog => |answer| blk: {
+            var out: ObjectBuilder = .init(a);
+            try out.str("behavior", @tagName(answer.behavior));
+            if (answer.behavior == .completed) try out.put("result", agent.json.valueOf(a, answer.result) orelse .null);
+            break :blk try agent.json.encodeValue(a, out.value());
+        },
+        .native => return errors.fail(diag, .invalid_answer, "claude: no native requests", .{}),
     };
     return control.respond(claude, a, pending.id.slice(), payload, null, diag);
 }

@@ -21,6 +21,39 @@ pub const Provider = struct {
     env: agent.Env,
     arena: std.heap.ArenaAllocator,
     options: options.Options,
+    /// The result of "pi --version" once it named a supported version;
+    /// guarded by `version_mutex` and allocated in `arena`. Anything else is
+    /// checked again next time, so installing or upgrading Pi needs no
+    /// restart.
+    version_status: ?types.ProviderStatus = null,
+    version_mutex: Io.Mutex = .init,
+
+    pub fn of(ptr: *anyopaque) *Provider {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    /// The installation status from "pi --version", in `a`.
+    pub fn versionStatus(provider: *Provider, a: Allocator) Allocator.Error!types.ProviderStatus {
+        provider.version_mutex.lockUncancelable(provider.env.io);
+        defer provider.version_mutex.unlock(provider.env.io);
+        if (provider.version_status) |cached| return agent.clone(types.ProviderStatus, a, cached);
+        const status = kit.versionStatus(provider.env, a, provider.path(), provider.options.env);
+        if (status.installed and status.@"error" == null and try versionProblem(a, status.version) == null)
+            provider.version_status = try agent.clone(types.ProviderStatus, provider.arena.allocator(), status);
+        return status;
+    }
+
+    /// Fails with `unsupported` when Pi runs but its version is unknown or
+    /// below `minimum_version`. A Pi that cannot run is left for the
+    /// launch to report.
+    pub fn requireVersion(provider: *Provider, diag: ?*Diagnostics) Error!void {
+        var arena: std.heap.ArenaAllocator = .init(provider.env.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const status = try provider.versionStatus(a);
+        if (!status.installed or status.@"error" != null) return;
+        if (try versionProblem(a, status.version)) |message| return errors.fail(diag, .unsupported, "{s}", .{message});
+    }
 
     pub fn path(provider: *const Provider) []const u8 {
         return if (provider.options.path.len > 0) provider.options.path else "pi";
@@ -75,6 +108,19 @@ pub fn capabilities(with_bridge: bool) types.Capabilities {
         .tasks = true,
         // With a todo extension, such as Pi's example todo tool.
         .plans = true,
+        // Tool updates and bash output stream (translate.zig toolUpdate,
+        // bash_execution_update).
+        .tool_output_stream = true,
+        // Rewind forks into a new session file (control.zig rewind).
+        .rewind_changes_session_id = true,
+        // Extensions can start runs; their turn_started has origin
+        // "extension" (translate.zig agent_start).
+        .background_turns = true,
+        // Not set: plans arrive whole from todo tool results
+        // (plan_updated, no plan_delta); requests come from the main
+        // agent only; Pi delivers steering after running tool calls
+        // finish; Pi has no dialogs, other native requests, or calls
+        // without a session.
         .check = true,
         .list_models = true,
         .list_sessions = true,
@@ -123,8 +169,20 @@ pub fn create(env: agent.Env, opts: options.Options) !agent.Provider {
     return .{ .ptr = provider, .vtable = if (opts.disable_bridge) &without_bridge_vtable else &with_bridge_vtable };
 }
 
-fn of(ptr: *anyopaque) *Provider {
-    return @ptrCast(@alignCast(ptr));
+const of = Provider.of;
+
+/// The oldest Pi the bridge runs on: it registers MCP servers with
+/// `pi.registerMcpServer`, added in Pi 0.99.0.
+pub const minimum_version = "0.99.0";
+
+/// Why Pi `version` cannot be used, or null when it is `minimum_version`
+/// or newer. A pre-release sorts before its release.
+pub fn versionProblem(a: Allocator, version: []const u8) Allocator.Error!?[]const u8 {
+    if (version.len == 0) return try std.fmt.allocPrint(a, "could not determine the Pi version; {s} or newer is required", .{minimum_version});
+    const order = kit.compareVersions(version, minimum_version);
+    const pre_release = std.mem.indexOfScalar(u8, std.mem.sliceTo(version, '+'), '-') != null;
+    if (order > 0 or (order == 0 and !pre_release)) return null;
+    return try std.fmt.allocPrint(a, "Pi {s} is unsupported; {s} or newer is required", .{ version, minimum_version });
 }
 
 fn deinit(ptr: *anyopaque) void {
@@ -137,13 +195,17 @@ fn start(ptr: *anyopaque, opts: agent.StartOptions, diag: ?*Diagnostics) Error!*
     return pi_session.start(of(ptr), opts, diag);
 }
 
-/// Runs "pi --version" and counts the models Pi can use: Pi has no
-/// account, so having at least one model with credentials counts as signed
-/// in.
+/// Runs "pi --version" (once per provider), requires `minimum_version`,
+/// and counts the models Pi can use: Pi has no account, so having at least
+/// one model with credentials counts as signed in.
 fn check(ptr: *anyopaque, a: Allocator, _: ?*Diagnostics) Error!types.ProviderStatus {
     const provider = of(ptr);
-    var status = kit.versionStatus(provider.env, a, provider.path(), provider.options.env);
+    var status = try provider.versionStatus(a);
     if (!status.installed or status.@"error" != null) return status;
+    if (try versionProblem(a, status.version)) |message| {
+        status.@"error" = .{ .kind = .unsupported, .message = message };
+        return status;
+    }
     var models_diag: Diagnostics = .{};
     const models = listModels(ptr, a, &models_diag) catch |e| return kit.failedStatus(a, status, &models_diag, e);
     status.auth = .{ .authenticated = models.len > 0 };
@@ -204,4 +266,38 @@ fn deleteSession(ptr: *anyopaque, session_id: []const u8, cwd: []const u8, diag:
 
 fn listSubagents(ptr: *anyopaque, a: Allocator, session_id: []const u8, cwd: []const u8, diag: ?*Diagnostics) Error![]const types.Task {
     return of(ptr).store("", null).listSubagents(a, session_id, cwd, diag);
+}
+
+test "Pi versions below 0.99.0 are unsupported" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("Pi 0.98.9 is unsupported; 0.99.0 or newer is required", (try versionProblem(a, "0.98.9")).?);
+    try std.testing.expectEqualStrings("Pi 0.99.0-rc.1 is unsupported; 0.99.0 or newer is required", (try versionProblem(a, "0.99.0-rc.1")).?);
+    try std.testing.expectEqualStrings("could not determine the Pi version; 0.99.0 or newer is required", (try versionProblem(a, "")).?);
+    try std.testing.expectEqual(null, try versionProblem(a, "0.99.0"));
+    try std.testing.expectEqual(null, try versionProblem(a, "0.100.0"));
+    try std.testing.expectEqual(null, try versionProblem(a, "1.4.0"));
+}
+
+test "check and start refuse an unsupported Pi without starting it" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const env: agent.Env = .{ .io = threaded.io(), .gpa = gpa, .environ = .empty };
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(env.io, .{ .sub_path = "pi", .data = "#!/bin/sh\necho 0.98.0\n", .flags = .{ .permissions = .executable_file } });
+    const p = try create(env, .{ .disable_bridge = true, .path = try tmp.dir.realPathFileAlloc(env.io, "pi", arena.allocator()) });
+    defer p.deinit();
+    const status = try p.check(arena.allocator(), null);
+    try std.testing.expectEqualStrings("0.98.0", status.version);
+    try std.testing.expectEqual(.unsupported, status.@"error".?.kind);
+    try std.testing.expectEqualStrings("Pi 0.98.0 is unsupported; 0.99.0 or newer is required", status.@"error".?.message);
+    var diag: Diagnostics = .{};
+    try std.testing.expectError(error.Unsupported, p.start(.{}, &diag));
+    try std.testing.expectEqualStrings("Pi 0.98.0 is unsupported; 0.99.0 or newer is required", diag.info.?.message);
 }

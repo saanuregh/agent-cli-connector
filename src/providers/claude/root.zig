@@ -11,8 +11,13 @@
 //!     "bypassPermissions", dont_ask is "dontAsk"); read_only is refused.
 //!   - output_schema becomes --json-schema for every turn; a per-turn
 //!     `Input.output_schema` is refused.
-//!   - fork_at_turn becomes --resume-session-at, resolved from the session
-//!     transcript.
+//!   - fork with resume_id becomes --fork-session, and fork_at_turn
+//!     --resume-session-at, resolved from the session transcript.
+//!     `Session.fork` instead copies the transcript into a new session
+//!     first (as the TypeScript SDK's forkSession does), cut at
+//!     fork_at_turn, and resumes that copy, so the fork persists before
+//!     its first turn; an ephemeral fork keeps the flags.
+//!   - command_prefix goes before the CLI executable.
 //!   - tools are served by an in-process MCP server (named "host" unless
 //!     `SessionOptions.tool_server_name` says otherwise); the model sees
 //!     them as "mcp__host__<name>". A tool with needs_approval gets the
@@ -53,4 +58,5 @@ test {
     _ = @import("history.zig");
     _ = @import("subagents.zig");
     _ = @import("translate_test.zig");
+    _ = @import("live_test.zig");
 }

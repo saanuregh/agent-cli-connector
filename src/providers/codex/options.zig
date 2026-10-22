@@ -21,6 +21,10 @@ pub const Options = struct {
     disable: []const []const u8 = &.{},
     /// Appended to the app-server command line.
     extra_args: []const []const u8 = &.{},
+    /// Words placed before the executable of every app-server the provider
+    /// starts, such as a sandbox wrapper. A dedicated app-server uses
+    /// `Config.command_prefix` instead when that is set.
+    command_prefix: []const []const u8 = &.{},
     /// Bounds the initialize handshake; zero means 60 s.
     startup_timeout_ms: i64 = 0,
     /// How long closing waits for a clean exit; zero means 5 s.
@@ -32,7 +36,8 @@ pub const Options = struct {
     client_title: []const u8 = "",
     client_version: []const u8 = "",
     /// Runs every session on one app-server process until the provider is
-    /// freed. Per-session `env` is then ignored and `unset_env` refused.
+    /// freed. Per-session `env` and `command_prefix` are then ignored and
+    /// `unset_env` refused.
     shared_server: bool = false,
     /// Turns off experimental app-server methods and fields. Host tools
     /// need them, so `Config.tools` is then ignored.

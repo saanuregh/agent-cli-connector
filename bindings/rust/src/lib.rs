@@ -19,7 +19,7 @@
 //! let turn = session.send("Summarize this repository").await?;
 //! let mut events = turn.events().await;
 //! while let Some(ev) = events.next().await {
-//!     if let EventPayload::TextDelta(d) = ev.payload {
+//!     if let EventPayload::TextDelta(d) = &ev.payload {
 //!         print!("{}", d.delta);
 //!     }
 //! }
@@ -38,11 +38,15 @@ pub mod protocol;
 mod session;
 pub mod sys;
 mod tool;
+mod transcript;
 mod transport;
 
 pub use client::{Client, Options};
 pub use error::{Error, Result};
 pub use protocol::*;
-pub use session::{Events, RequestResponse, Session, SessionOptions, Turn, TurnEvents};
+pub use session::{
+    Events, RequestResponse, Session, SessionEvent, SessionOptions, Subscription, Turn, TurnEvents,
+};
 pub use tool::{CancelToken, Tool};
+pub use transcript::{Transcript, TranscriptChange};
 pub use transport::library_version;

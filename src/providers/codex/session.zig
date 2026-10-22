@@ -44,7 +44,6 @@ pub const CodexSession = struct {
 
     /// Guards the fields below and the translator.
     mutex: Io.Mutex = .init,
-    /// Changes when a rewind falls back to a fork.
     thread: Id = .{},
     model: Id = .{},
     effort: Id = .{},
@@ -176,19 +175,23 @@ pub const CodexSession = struct {
         codex.mutex.unlock(codex.env.io);
         codex.rememberSandbox(a, response.get("sandbox"));
         codex.rt().setSessionId(id);
+        const cwd = providerkit.firstOf(&.{ response.str("cwd"), thread.str("cwd"), cfg.cwd });
+        // Usage events report this window until Codex reports one.
+        const context_window = control.configuredContextWindow(codex, a, cwd);
 
         var tools: std.ArrayList([]const u8) = .empty;
         for (cfg.tools) |tool| try tools.append(a, tool.name);
         const info: types.SessionInfo = .{
             .id = id,
             .provider = name,
-            .cwd = providerkit.firstOf(&.{ response.str("cwd"), thread.str("cwd"), cfg.cwd }),
+            .cwd = cwd,
             .model = response.str("model"),
             .effort = effort.slice(),
             .permission_mode = providerkit.firstOf(&.{ cfg.permission_mode, modeOf(response.get("approvalPolicy"), response.get("sandbox")) }),
             .title = providerkit.firstOf(&.{ cfg.title, thread.str("name") }),
             .version = providerkit.firstOf(&.{ thread.str("cliVersion"), client.version() }),
             .tools = tools.items,
+            .context_window = context_window,
             .raw = result,
         };
         codex.rt().setInfo(info, false);
@@ -241,7 +244,6 @@ pub const CodexSession = struct {
 
     /// Fields of the session info to change; null leaves a field as it is.
     pub const InfoChange = struct {
-        id: ?[]const u8 = null,
         model: ?[]const u8 = null,
         effort: ?[]const u8 = null,
         permission_mode: ?[]const u8 = null,
@@ -249,6 +251,7 @@ pub const CodexSession = struct {
         commands: ?[]const types.SlashCommand = null,
         /// Added, or replaces the status of the server with the same name.
         mcp_server: ?types.McpServerStatus = null,
+        context_window: ?i64 = null,
     };
 
     /// Applies `change` to the session info and reports it with
@@ -259,12 +262,12 @@ pub const CodexSession = struct {
     }
 
     fn applyInfoChange(change: InfoChange, info: *types.SessionInfo, a: Allocator) Allocator.Error!void {
-        if (change.id) |id| info.id = try a.dupe(u8, id);
         if (change.model) |model| info.model = try a.dupe(u8, model);
         if (change.effort) |effort| info.effort = try a.dupe(u8, effort);
         if (change.permission_mode) |mode| info.permission_mode = try a.dupe(u8, mode);
         if (change.title) |title| info.title = try a.dupe(u8, title);
         if (change.commands) |commands| info.commands = try agent.clone([]const types.SlashCommand, a, commands);
+        if (change.context_window) |limit| info.context_window = limit;
         if (change.mcp_server) |status| info.mcp_servers = try withServerStatus(a, info.mcp_servers, try agent.clone(types.McpServerStatus, a, status));
     }
 
@@ -452,6 +455,9 @@ pub const CodexSession = struct {
         defer arena.deinit();
         const a = arena.allocator();
         const params = try codex.turnParams(a, in, diag);
+        // Encoded before the start, so nothing fails between endStart and
+        // accepted, which clears the start in flight.
+        const sandbox: ?[]const u8 = if (params.map.get("sandboxPolicy")) |policy| (if (policy == .object) try agent.json.encodeValue(a, policy) else null) else null;
         translate.beginStart(codex, params.has("outputSchema"));
         // Once sent, the start is not abandoned: Codex may already run the
         // turn, and a later start could be mistaken for it.
@@ -461,7 +467,6 @@ pub const CodexSession = struct {
         };
         const native = response.get("turn").str("id");
         translate.endStart(codex, native);
-        const sandbox: ?[]const u8 = if (params.map.get("sandboxPolicy")) |policy| (if (policy == .object) try agent.json.encodeValue(a, policy) else null) else null;
         codex.accepted(id, native, sandbox);
     }
 
@@ -474,6 +479,7 @@ pub const CodexSession = struct {
         // instantly may have completed before it was registered; the
         // runtime held its result back for this moment.
         const stop = codex.rt().accepted(id, native);
+        codex.translator.start_pending = false;
         if (sandbox) |policy| codex.setSandboxLocked(policy);
         codex.mutex.unlock(codex.env.io);
         if (stop) {
@@ -524,7 +530,7 @@ pub const CodexSession = struct {
         });
         if (in.model.len > 0) try params.str("model", in.model);
         try params.strIf("effort", effort);
-        try params.strIf("summary", codex.opts.reasoning_summary);
+        try params.str("summary", providerkit.firstOf(&.{ codex.opts.reasoning_summary, "detailed" }));
         if (plan) try params.put("collaborationMode", try collaborationMode(a, "plan", model, effort));
         try params.merge(codex.opts.extra_turn_params);
         const turn_options = try providerkit.options(options.TurnOptions, a, name, in.provider_options, diag);
@@ -598,37 +604,22 @@ pub const CodexSession = struct {
     // ------------------------------------------------------------ close
 
     /// Ends the session. A dedicated app-server is stopped; on a shared one
-    /// the thread's pending requests are refused, its turn interrupted, and
-    /// the thread unsubscribed.
+    /// the thread is only unsubscribed: its turn is not interrupted.
+    /// Pending requests are withdrawn without an answer to Codex.
     fn shutdown(codex: *CodexSession) void {
         if (codex.closed.swap(true, .acq_rel)) return;
         const client = codex.client;
         const id = codex.threadId();
         client.unregister(id.slice());
+        // No request arrives once no delivery to the session is in flight.
+        client.quiesce();
+        codex.rt().withdrawAll();
         if (codex.owned) {
             client.close();
         } else {
             var arena: std.heap.ArenaAllocator = .init(codex.env.gpa);
             defer arena.deinit();
             const a = arena.allocator();
-            // Best-effort cleanup of a thread the session leaves: the
-            // app-server drops what is left when the thread is
-            // unsubscribed below.
-            const pending = codex.rt().pendingRequests(a) catch &.{};
-            for (pending) |event| {
-                const response: types.Response = switch (event.payload) {
-                    .permission_request => .{ .permission = .{ .decision = .cancel } },
-                    .user_input_request => .{ .user_input = .{ .cancelled = true } },
-                    .elicitation_request => .{ .elicitation = .{ .action = .cancel } },
-                    else => continue,
-                };
-                const request_id = switch (event.payload) {
-                    inline .permission_request, .user_input_request, .elicitation_request => |request| request.id,
-                    else => continue,
-                };
-                codex.session.respond(request_id, response, null) catch {};
-            }
-            codex.interruptTurn("", null) catch {};
             if (codex.threadIdParams(a)) |params| {
                 _ = client.call(a, "thread/unsubscribe", params.value(), .{ .owner = codex, .timeout_ms = client.shutdownGraceMs() }, null) catch {};
             } else |_| {}
@@ -710,6 +701,7 @@ pub fn checkConfig(a: Allocator, cfg: types.Config, owned: bool, experimental: b
     }
     if (!owned and cfg.env != null and cfg.env.?.map.count() > 0) try ignored.append(a, "env on a shared app-server");
     if (!owned and cfg.wire_tap) try ignored.append(a, "wire_tap on a shared app-server");
+    if (!owned and cfg.command_prefix.len > 0) try ignored.append(a, "command_prefix on a shared app-server");
     return providerkit.ignoredConfig(a, name, cfg, ignored.items, diag);
 }
 

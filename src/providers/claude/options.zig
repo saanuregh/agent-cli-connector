@@ -8,7 +8,7 @@ const RawJson = agent.json.RawJson;
 /// The Claude Agent SDK release whose wire protocol this package implements.
 /// It is sent as CLAUDE_AGENT_SDK_VERSION, which the CLI only reports in its
 /// User-Agent.
-pub const protocol_version = "0.3.302";
+pub const protocol_version = "0.3.308";
 
 /// Splits a block system prompt into a cacheable prefix and a
 /// session-specific suffix.
@@ -136,6 +136,10 @@ pub const SessionOptions = struct {
     /// Configures built-in tools, such as
     /// {"askUserQuestion": {"previewFormat": "html"}}.
     tool_config: ?RawJson = null,
+    /// The `request_user_dialog` kinds the host can show, such as
+    /// "resume_return". The CLI sends only declared kinds as
+    /// `dialog_request`; for others it takes the no-dialog path.
+    supported_dialog_kinds: []const []const u8 = &.{},
 
     /// Names the in-process MCP server serving `Config.tools`. Empty means
     /// "host".

@@ -65,6 +65,8 @@ pub const StartConfig = struct {
     cwd: []const u8 = "",
     env: ?types.StringMap = null,
     unset_env: []const []const u8 = &.{},
+    /// Replaces `Options.command_prefix` when not empty.
+    command_prefix: []const []const u8 = &.{},
     /// Receives every protocol line as wire events.
     tap: ?*agent.runtime.Runtime = null,
 };
@@ -130,6 +132,7 @@ pub const Client = struct {
         client.proc = try agent.process.Process.start(env, .{
             .provider = name,
             .argv = try appServerArgs(a, opts),
+            .command_prefix = if (config.command_prefix.len > 0) config.command_prefix else opts.command_prefix,
             .cwd = config.cwd,
             .env = proc_env,
             .unset_env = unset.items,
@@ -439,19 +442,6 @@ pub const Client = struct {
             var list = kv.value;
             freeLines(client.env.gpa, &list);
         }
-    }
-
-    /// Routes thread `id` to `codex` instead of thread `old`, after `codex` moved to
-    /// a fork of `old`.
-    pub fn rekey(client: *Client, old: []const u8, id: []const u8, codex: *CodexSession) void {
-        {
-            client.mutex.lockUncancelable(client.env.io);
-            defer client.mutex.unlock(client.env.io);
-            if (client.threads.get(.of(old))) |current| if (current == codex) {
-                _ = client.threads.orderedRemove(.of(old));
-            };
-        }
-        client.publish(id, codex, false);
     }
 
     /// Routes a subagent thread's messages to its parent session.

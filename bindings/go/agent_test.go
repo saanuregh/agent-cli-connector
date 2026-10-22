@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ func start(t *testing.T, opts ...agent.SessionOption) (context.Context, *agent.S
 
 func TestTurnStreamsDeltas(t *testing.T) {
 	ctx, sess := start(t)
+	events := sess.Events()
 	turn, err := sess.Send(ctx, agent.Text("hello brave world"))
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +51,7 @@ func TestTurnStreamsDeltas(t *testing.T) {
 
 	// The session stream has the same turn, from session_started on.
 	var types []agent.EventType
-	for ev := range sess.Events() {
+	for ev := range events {
 		types = append(types, ev.Type)
 		if ev.Type == agent.EventTypeTurnCompleted {
 			break
@@ -88,15 +90,170 @@ func TestPermissionRequest(t *testing.T) {
 		t.Fatalf("result %+v, error %v", res, err)
 	}
 
-	// A handler answers instead, and the request is not an event.
+	// A handler answers instead; the request is still an event, marked handled.
 	ctx, sess = start(t, agent.WithHandlers(agent.Handlers{
 		Permission: func(context.Context, *agent.PermissionRequest) agent.PermissionResponse {
 			return agent.PermissionResponse{Decision: agent.PermissionDecisionDeny}
 		},
 	}))
-	res, err = sess.Run(ctx, agent.Text("needs permission"))
-	if err != nil || res.Text != "permission denied" {
+	turn, err = sess.Send(ctx, agent.Text("needs permission"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handled := 0
+	for ev := range turn.Events() {
+		if _, ok := ev.Payload.(agent.PermissionRequest); ok && sess.Handled(ev) {
+			handled++
+		}
+	}
+	res, err = turn.Wait(ctx)
+	if err != nil || res.Text != "permission denied" || handled != 1 {
+		t.Fatalf("result %+v, error %v, handled %d", res, err, handled)
+	}
+}
+
+func TestDialogAndNativeHelpers(t *testing.T) {
+	ctx, sess := start(t)
+	cases := []struct {
+		prompt string
+		answer func(agent.Event) error
+		want   string
+	}{
+		{"dialog", func(ev agent.Event) error {
+			req := ev.Payload.(agent.DialogRequest)
+			return req.Complete(ctx, sess, "ok")
+		}, `dialog completed "ok"`},
+		{"dialog", func(ev agent.Event) error {
+			req := ev.Payload.(agent.DialogRequest)
+			return req.Cancel(ctx, sess)
+		}, "dialog cancelled"},
+		{"native", func(ev agent.Event) error {
+			req := ev.Payload.(agent.NativeRequest)
+			return req.Reply(ctx, sess, "pong")
+		}, `native result "pong"`},
+		{"native", func(ev agent.Event) error {
+			req := ev.Payload.(agent.NativeRequest)
+			return req.Fail(ctx, sess, 7, "nope")
+		}, "native error 7 nope"},
+	}
+	for _, c := range cases {
+		turn, err := sess.Send(ctx, agent.Text(c.prompt))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for ev := range turn.Events() {
+			if ev.Type == agent.EventTypeDialogRequest || ev.Type == agent.EventTypeNativeRequest {
+				if sess.Handled(ev) {
+					t.Fatal("unhandled request marked handled")
+				}
+				if err := c.answer(ev); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if res, err := turn.Wait(ctx); err != nil || res.Text != c.want {
+			t.Fatalf("result %+v, error %v, want %q", res, err, c.want)
+		}
+	}
+}
+
+func TestHandlerPanicFailsClosed(t *testing.T) {
+	ctx, sess := start(t, agent.WithHandlers(agent.Handlers{
+		Dialog: func(context.Context, *agent.DialogRequest) agent.DialogResponse { panic("boom") },
+		Native: func(context.Context, *agent.NativeRequest) agent.NativeResponse { panic("boom") },
+	}))
+	for prompt, want := range map[string]string{"dialog": "dialog cancelled", "native": "native error -32603 boom"} {
+		if res, err := sess.Run(ctx, agent.Text(prompt)); err != nil || res.Text != want {
+			t.Fatalf("result %+v, error %v, want %q", res, err, want)
+		}
+	}
+	ctx, sess = start(t, agent.WithHandlers(agent.Handlers{
+		Dialog: func(context.Context, *agent.DialogRequest) agent.DialogResponse {
+			return agent.DialogResponse{Behavior: agent.DialogResponseBehaviorCompleted}
+		},
+	}))
+	if res, err := sess.Run(ctx, agent.Text("dialog")); err != nil || res.Text != "dialog completed" {
 		t.Fatalf("result %+v, error %v", res, err)
+	}
+}
+
+func TestSubscribe(t *testing.T) {
+	ctx, sess := start(t)
+	var mu sync.Mutex
+	var got []agent.Event
+	firstDone := make(chan struct{})
+	unsubscribe := sess.Subscribe(func(ev agent.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, ev)
+		if ev.Type == agent.EventTypeTurnCompleted {
+			close(firstDone)
+		}
+	})
+	sess.Subscribe(func(agent.Event) { panic("listener failure") })
+	if _, err := sess.Run(ctx, agent.Text("one")); err != nil {
+		t.Fatal(err)
+	}
+	<-firstDone
+	unsubscribe()
+	turn, err := sess.Send(ctx, agent.Text("two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := turn.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Close(); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, ev := range got {
+		if ev.TurnID == turn.ID() {
+			t.Fatalf("listener called after unsubscribe: %s", ev.Type)
+		}
+	}
+}
+
+func TestSubscribeListenerAnswersRequest(t *testing.T) {
+	ctx, sess := start(t)
+	sess.Subscribe(func(ev agent.Event) {
+		if req, ok := ev.Payload.(agent.PermissionRequest); ok {
+			if err := req.Allow(ctx, sess); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	if res, err := sess.Run(ctx, agent.Text("needs permission")); err != nil || res.Text != "needs permission" {
+		t.Fatalf("result %+v, error %v", res, err)
+	}
+}
+
+func TestEventsBufferFromFirstCall(t *testing.T) {
+	ctx, sess := start(t)
+	if _, err := sess.Run(ctx, agent.Text("before")); err != nil {
+		t.Fatal(err)
+	}
+	events := sess.Events()
+	turn, err := sess.Send(ctx, agent.Text("after"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := true
+	for ev := range events {
+		if first {
+			first = false
+			if ev.Type != agent.EventTypeSessionStarted {
+				t.Fatalf("first event %s", ev.Type)
+			}
+			continue
+		}
+		if ev.Type == agent.EventTypeSessionStarted || (ev.TurnID != "" && ev.TurnID != turn.ID()) {
+			t.Fatalf("event from before Events: %s turn %q", ev.Type, ev.TurnID)
+		}
+		if ev.Type == agent.EventTypeTurnCompleted {
+			break
+		}
 	}
 }
 

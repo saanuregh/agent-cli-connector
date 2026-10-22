@@ -42,21 +42,22 @@ const Result = struct {
     session_id: []const u8 = "",
 };
 
-pub fn rewind(s: *Session, turn_id: []const u8, diag: ?*Diagnostics) errors.Error!void {
-    var arena: std.heap.ArenaAllocator = .init(s.rt.env.gpa);
-    defer arena.deinit();
-    _ = try rewindWithResult(ClaudeSession.of(s), arena.allocator(), turn_id, diag);
+/// `Session.VTable.rewind`. The session continues under its ID unless a
+/// restart at the first turn started a new one; it never forks.
+pub fn rewind(s: *Session, turn_id: []const u8, a: Allocator, diag: ?*Diagnostics) errors.Error!types.RewindResult {
+    const result = try rewindTurn(ClaudeSession.of(s), a, turn_id, diag);
+    return .{ .session_id = result.session_id, .removed_item_ids = result.removed_item_ids };
 }
 
 /// Drops `turn_id` (a turn ID, an item ID of this session, or a message
-/// UUID from the transcript) and every later turn, and returns the result
-/// as JSON. It asks the CLI to rewind in place, which keeps the process,
-/// its background tasks, and the session ID. When the CLI cannot, it
+/// UUID from the transcript) and every later turn. It asks the CLI to
+/// rewind in place, which keeps the process, its background tasks, and the
+/// session ID. When the CLI cannot, it
 /// restarts the CLI with --resume, --resume-session-at set to the entry
 /// before that turn's prompt, and --resume-drops-turn set to the prompt;
 /// rewinding the first turn that way starts a new, empty session. An
 /// items_removed event lists the dropped items. File changes are not undone.
-pub fn rewindWithResult(claude: *ClaudeSession, a: Allocator, turn_id: []const u8, diag: ?*Diagnostics) errors.Error![]const u8 {
+pub fn rewindTurn(claude: *ClaudeSession, a: Allocator, turn_id: []const u8, diag: ?*Diagnostics) errors.Error!Result {
     const io = claude.io();
     claude.swap_lock.lockUncancelable(io);
     defer claude.swap_lock.unlock(io);
@@ -108,7 +109,7 @@ pub fn rewindWithResult(claude: *ClaudeSession, a: Allocator, turn_id: []const u
     if (all.items.len > 0) claude.emit(.{ .payload = .{ .items_removed = .{ .ids = all.items } } });
     result.removed_item_ids = all.items;
     result.session_id = try claude.sessionId(a);
-    return (try RawJson.encode(a, result)).bytes;
+    return result;
 }
 
 /// Copies the details of `err` from `details` into `diag` and returns it.
@@ -207,7 +208,7 @@ fn restartRewind(claude: *ClaudeSession, a: Allocator, graph: history.Graph, tar
     info.commands = try control.slashCommands(a, init_response.get("commands"));
     info.raw = .of(init.raw);
     info.id = session_id;
-    claude.rt().setInfo(info, true);
+    claude.rt().setInfoFor(info, true, .rewind);
     return result;
 }
 
@@ -264,12 +265,6 @@ fn retireProcess(claude: *ClaudeSession) void {
 pub fn forkPoint(provider: *Provider, a: Allocator, cfg: types.Config, session_id: []const u8, turn_id: []const u8, diag: ?*Diagnostics) errors.Error![]const u8 {
     const graph = try history.loadTranscript(provider, a, cfg, session_id, diag);
     return graph.forkPoint(a, turn_id, diag);
-}
-
-/// Whether a session's transcript holds message `uuid`.
-pub fn transcriptHas(provider: *Provider, a: Allocator, cfg: types.Config, session_id: []const u8, uuid: []const u8) bool {
-    const graph = history.loadTranscript(provider, a, cfg, session_id, null) catch return false;
-    return graph.by_id.contains(uuid);
 }
 
 const log = std.log.scoped(.agent);

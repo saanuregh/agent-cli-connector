@@ -51,6 +51,28 @@ func (c *Client) ListSubagents(ctx context.Context, provider string, sessionID s
 	return out, err
 }
 
+// Call sends a native request that needs no session, such as a Codex app-server
+// method like `account/read`, and returns the harness's answer. params is any
+// JSON value; nil sends none. The result is decoded into result; nil discards
+// it.
+func (c *Client) Call(ctx context.Context, provider string, method string, params any, result any) error {
+	paramsJSON, err := marshalRaw(params)
+	if err != nil {
+		return err
+	}
+	return c.call(ctx, MethodProviderCall, ProviderCallParams{Provider: provider, Method: method, Params: paramsJSON}, result)
+}
+
+// State reads a snapshot of the session: status, running and queued turns,
+// unfinished tasks, pending requests, usage, and info.
+func (s *Session) State(ctx context.Context) (*SessionState, error) {
+	var out SessionState
+	if err := s.client.call(ctx, MethodSessionState, SessionParams{Session: s.handle}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Interrupt stops the running turn. Queued input still runs afterwards.
 func (s *Session) Interrupt(ctx context.Context) error {
 	return s.client.call(ctx, MethodSessionInterrupt, SessionParams{Session: s.handle}, nil)
@@ -90,10 +112,15 @@ func (s *Session) Compact(ctx context.Context, instructions string) error {
 	return s.client.call(ctx, MethodSessionCompact, CompactParams{Session: s.handle, Instructions: instructions}, nil)
 }
 
-// Rewind drops a turn and every later turn from the conversation. File changes
-// are not undone.
-func (s *Session) Rewind(ctx context.Context, turnID string) error {
-	return s.client.call(ctx, MethodSessionRewind, TurnParams{Session: s.handle, TurnID: turnID}, nil)
+// Rewind drops a turn and every later turn from the conversation and returns
+// the session ID afterwards, which changes on some harnesses. File changes are
+// not undone.
+func (s *Session) Rewind(ctx context.Context, turnID string) (*RewindResult, error) {
+	var out RewindResult
+	if err := s.client.call(ctx, MethodSessionRewind, TurnParams{Session: s.handle, TurnID: turnID}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // StopTask stops one background task, such as a subagent, without interrupting

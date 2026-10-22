@@ -3,6 +3,7 @@ import type {
   Capabilities,
   ClosedNotification,
   Config,
+  DialogResponse,
   ElicitationResponse,
   ElicitationResponseAction,
   ErrorInfo,
@@ -12,6 +13,7 @@ import type {
   EventOf,
   Input,
   Methods,
+  NativeResponse,
   PermissionDecision,
   PermissionResponse,
   ProviderInfo,
@@ -56,7 +58,17 @@ function closedError(message: string, cause?: ErrorInfo): AgentError {
 
 // ---------------------------------------------------------------- events
 
-type RequestType = "permission_request" | "user_input_request" | "elicitation_request";
+const requestTypes = ["permission_request", "user_input_request", "elicitation_request", "dialog_request", "native_request"] as const;
+type RequestType = (typeof requestTypes)[number];
+
+function isRequest(ev: Event): ev is EventOf<RequestType> {
+  return (requestTypes as readonly string[]).includes(ev.type);
+}
+
+/** Set on a request event a session option's handler answers; the event is still delivered. */
+export interface RequestHandledMarker {
+  readonly handled?: true;
+}
 
 export interface PermissionRequestHelpers {
   respond(response: PermissionResponse): Promise<void>;
@@ -79,16 +91,35 @@ export interface ElicitationRequestHelpers {
   cancel(): Promise<void>;
 }
 
-export type PermissionRequestEvent = EventOf<"permission_request"> & PermissionRequestHelpers;
-export type UserInputRequestEvent = EventOf<"user_input_request"> & UserInputRequestHelpers;
-export type ElicitationRequestEvent = EventOf<"elicitation_request"> & ElicitationRequestHelpers;
+export interface DialogRequestHelpers {
+  respond(response: DialogResponse): Promise<void>;
+  /** Completes the dialog with an optional result. */
+  complete(result?: unknown): Promise<void>;
+  cancel(): Promise<void>;
+}
+
+export interface NativeRequestHelpers {
+  respond(response: NativeResponse): Promise<void>;
+  /** Answers with a JSON-RPC result. */
+  reply(result?: unknown): Promise<void>;
+  /** Answers with a JSON-RPC error. */
+  fail(code: number, message: string): Promise<void>;
+}
+
+export type PermissionRequestEvent = EventOf<"permission_request"> & PermissionRequestHelpers & RequestHandledMarker;
+export type UserInputRequestEvent = EventOf<"user_input_request"> & UserInputRequestHelpers & RequestHandledMarker;
+export type ElicitationRequestEvent = EventOf<"elicitation_request"> & ElicitationRequestHelpers & RequestHandledMarker;
+export type DialogRequestEvent = EventOf<"dialog_request"> & DialogRequestHelpers & RequestHandledMarker;
+export type NativeRequestEvent = EventOf<"native_request"> & NativeRequestHelpers & RequestHandledMarker;
 
 /** An event of a session. Narrow on `type`; request events carry answering helpers. */
 export type SessionEvent =
   | Exclude<Event, { type: RequestType }>
   | PermissionRequestEvent
   | UserInputRequestEvent
-  | ElicitationRequestEvent;
+  | ElicitationRequestEvent
+  | DialogRequestEvent
+  | NativeRequestEvent;
 
 /** The read items a channel drops at once, so a long backlog does not copy on every read. */
 const channelCompactAfter = 1024;
@@ -179,6 +210,10 @@ export interface SessionOptions extends Omit<Config, "tools"> {
   onPermission?: (request: PermissionRequestEvent) => Promise<PermissionDecision | PermissionResponse>;
   onUserInput?: (request: UserInputRequestEvent) => Promise<UserInputResponse>;
   onElicitation?: (request: ElicitationRequestEvent) => Promise<ElicitationResponseAction | ElicitationResponse>;
+  /** Answers dialog requests. A thrown error cancels the dialog. */
+  onDialog?: (request: DialogRequestEvent) => Promise<DialogResponse>;
+  /** Answers provider-native requests. A thrown error answers with JSON-RPC error -32603 and its message. */
+  onNativeRequest?: (request: NativeRequestEvent) => Promise<NativeResponse>;
 }
 
 export interface WaitOptions {
@@ -295,7 +330,7 @@ export class Client extends ClientMethods {
     provider: string,
     options: SessionOptions,
   ): Promise<Session> {
-    const { tools = [], onPermission, onUserInput, onElicitation, ...config } = options;
+    const { tools = [], onPermission, onUserInput, onElicitation, onDialog, onNativeRequest, ...config } = options;
     const fullConfig: Config = { ...config, tools: tools.length > 0 ? tools.map((t) => t.definition) : undefined };
     // The session exists before the request names its handle, so every message finds it.
     const session = new Session(this, randomUUID(), provider, options);
@@ -388,10 +423,14 @@ export class Session extends SessionMethods {
   /** Running tool calls by ID, aborted by `tool/cancel`. */
   readonly #toolCalls = new Map<string, AbortController>();
   #capabilities: Capabilities = {};
-  #info: SessionInfo = {};
+  #info: SessionInfo = { context_window: 0 };
   /** Set once an event reported info, which is then newer than the start result. */
   #infoReported = false;
-  readonly #events = new Channel<SessionEvent>();
+  /** The `events()` stream, created by its first call. */
+  #events: Channel<SessionEvent> | undefined;
+  /** Kept for the first `events()` call, which yields it first. */
+  #startedEvent: SessionEvent | undefined;
+  readonly #listeners = new Set<(event: SessionEvent) => void>();
   /** The events of the turns `send` started, by ID, from before the request until the turn ends. */
   readonly #turns = new Map<string, Channel<SessionEvent>>();
   #resolveClosed!: (info: ErrorInfo | undefined) => void;
@@ -422,13 +461,35 @@ export class Session extends SessionMethods {
     return this.#info.id ?? "";
   }
 
+  /** The latest session info, from the start result, session events, or `fetchInfo`. */
+  get info(): SessionInfo {
+    return this.#info;
+  }
+
   /**
-   * Every event of the session in arrival order, buffered from the start
-   * until read. One stream: concurrent readers share it. Ends when the
-   * session closes.
+   * Every event of the session in arrival order: `session_started` first,
+   * then every event from the first call on, buffered until read; other
+   * earlier events are not kept. One stream: concurrent
+   * readers share it. Ends when the session closes.
    */
   events(): AsyncGenerator<SessionEvent, void, undefined> {
+    if (!this.#events) {
+      this.#events = new Channel<SessionEvent>();
+      if (this.#startedEvent) this.#events.push(this.#startedEvent);
+      this.#startedEvent = undefined;
+      if (this.#isClosed) this.#events.end();
+    }
     return this.#events.read();
+  }
+
+  /**
+   * Calls `listener` with every later event synchronously, in order. Errors it
+   * throws are ignored. Returns a function that unsubscribes it.
+   */
+  subscribe(listener: (event: SessionEvent) => void): () => void {
+    const entry = (event: SessionEvent) => listener(event);
+    this.#listeners.add(entry);
+    return () => void this.#listeners.delete(entry);
   }
 
   /** Sends input; the turn runs now or after the queued ones. */
@@ -461,7 +522,8 @@ export class Session extends SessionMethods {
     return this.#client[openSession]("session/fork", { session: this.handle }, this.provider, options);
   }
 
-  async info(): Promise<SessionInfo> {
+  /** Asks the library for the session info and updates `info`. */
+  async fetchInfo(): Promise<SessionInfo> {
     this.#info = await this.#request("session/info", {});
     return this.#info;
   }
@@ -520,7 +582,7 @@ export class Session extends SessionMethods {
   [closeLocal](error: ErrorInfo | undefined): void {
     if (this.#isClosed) return;
     this.#isClosed = true;
-    this.#events.end();
+    this.#events?.end();
     for (const c of this.#turns.values()) c.end();
     this.#turns.clear();
     this.#resolveClosed(error);
@@ -532,7 +594,17 @@ export class Session extends SessionMethods {
       this.#info = ev.info;
       this.#infoReported = true;
     }
-    this.#events.push(ev);
+    if (ev.type === "session_started" && !this.#events) this.#startedEvent = ev;
+    const handled = this.#autoAnswer(ev);
+    if (handled) Object.defineProperty(ev, "handled", { value: true, enumerable: false });
+    this.#events?.push(ev);
+    for (const listener of this.#listeners) {
+      try {
+        listener(ev);
+      } catch {
+        // A failing subscriber must not stop delivery to the others.
+      }
+    }
     const channel = ev.turn_id ? this.#turns.get(ev.turn_id) : undefined;
     if (channel) {
       channel.push(ev);
@@ -541,11 +613,11 @@ export class Session extends SessionMethods {
         this.#turns.delete(ev.turn_id!);
       }
     }
-    this.#autoAnswer(ev);
   }
 
-  #autoAnswer(ev: SessionEvent): void {
-    if (ev.type !== "permission_request" && ev.type !== "user_input_request" && ev.type !== "elicitation_request") return;
+  /** Starts answering `ev` with the matching session option's handler; returns whether one exists. */
+  #autoAnswer(ev: SessionEvent): boolean {
+    if (!isRequest(ev)) return false;
     const o = this.#options;
     if (ev.type === "permission_request" && o.onPermission) {
       const h = o.onPermission;
@@ -564,14 +636,32 @@ export class Session extends SessionMethods {
         (v) => ev.respond(typeof v === "string" ? { action: v } : v),
         () => ev.cancel(),
       );
+    } else if (ev.type === "dialog_request" && o.onDialog) {
+      const h = o.onDialog;
+      answerInBackground(() => h(ev), (v) => ev.respond(v), () => ev.cancel());
+    } else if (ev.type === "native_request" && o.onNativeRequest) {
+      const h = o.onNativeRequest;
+      answerInBackground(
+        () => h(ev),
+        (v) => ev.respond(v),
+        (err) => ev.fail(-32603, err instanceof Error ? err.message : String(err)),
+      );
+    } else {
+      return false;
     }
+    return true;
   }
 
   /** Adds the answering helpers to request events. They are not enumerable, so the event still serializes as wire JSON. */
   #bind(ev: Event): SessionEvent {
-    if (ev.type !== "permission_request" && ev.type !== "user_input_request" && ev.type !== "elicitation_request") return ev;
+    if (!isRequest(ev)) return ev;
     const id = ev.id ?? "";
-    let helpers: PermissionRequestHelpers | UserInputRequestHelpers | ElicitationRequestHelpers;
+    let helpers:
+      | PermissionRequestHelpers
+      | UserInputRequestHelpers
+      | ElicitationRequestHelpers
+      | DialogRequestHelpers
+      | NativeRequestHelpers;
     if (ev.type === "permission_request") {
       const respond = (permission: PermissionResponse) => this.respond(id, { permission });
       helpers = {
@@ -586,6 +676,20 @@ export class Session extends SessionMethods {
         answer: (answers) =>
           respond({ answers: Object.fromEntries(Object.entries(answers).map(([k, v]) => [k, Array.isArray(v) ? v : [v]])) }),
         cancel: () => respond({ cancelled: true }),
+      };
+    } else if (ev.type === "dialog_request") {
+      const respond = (dialog: DialogResponse) => this.respond(id, { dialog });
+      helpers = {
+        respond,
+        complete: (result) => respond({ behavior: "completed", result }),
+        cancel: () => respond({ behavior: "cancelled" }),
+      };
+    } else if (ev.type === "native_request") {
+      const respond = (native: NativeResponse) => this.respond(id, { native });
+      helpers = {
+        respond,
+        reply: (result) => respond({ result }),
+        fail: (code, message) => respond({ error: { code, message } }),
       };
     } else {
       const respond = (elicitation: ElicitationResponse) => this.respond(id, { elicitation });

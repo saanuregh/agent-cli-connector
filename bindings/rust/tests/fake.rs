@@ -1,9 +1,11 @@
 //! Behavior tests against the library's scripted `fake` provider.
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use agent_cli_connector::{
-    CancelToken, Client, Config, ErrorKind, EventPayload, Options, PermissionDecision,
-    PermissionResponse, SessionOptions, Tool, ToolResult, TurnStatus,
+    CancelToken, Client, Config, DialogResponse, DialogResponseBehavior, ErrorKind, EventPayload,
+    NativeResponse, Options, PermissionDecision, PermissionResponse, SessionEvent, SessionOptions,
+    Tool, ToolResult, TurnStatus,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -15,7 +17,7 @@ fn fake() -> Options {
 async fn text_of(mut events: agent_cli_connector::TurnEvents) -> String {
     let mut text = String::new();
     while let Some(ev) = events.next().await {
-        if let EventPayload::TextDelta(d) = ev.payload {
+        if let EventPayload::TextDelta(d) = &ev.payload {
             text.push_str(&d.delta);
         }
     }
@@ -26,6 +28,7 @@ async fn text_of(mut events: agent_cli_connector::TurnEvents) -> String {
 async fn run_streams_text_deltas() {
     let client = Client::open(fake()).await.unwrap();
     let session = client.start("fake", Config::default()).await.unwrap();
+    let mut events = session.events().await;
     let turn = session.send("hello streaming world").await.unwrap();
     assert_eq!(text_of(turn.events().await).await, "hello streaming world");
     assert_eq!(turn.wait().await.unwrap().text, "hello streaming world");
@@ -36,10 +39,9 @@ async fn run_streams_text_deltas() {
 
     // Reading the turn took nothing from the session stream.
     session.close().await.unwrap();
-    let mut events = session.events().await;
     let (mut text, mut completed) = (String::new(), 0);
     while let Some(ev) = events.next().await {
-        match ev.payload {
+        match &ev.payload {
             EventPayload::TextDelta(d) => text.push_str(&d.delta),
             EventPayload::TurnCompleted(_) => completed += 1,
             _ => {}
@@ -55,8 +57,9 @@ async fn permission_requests_are_answered() {
 
     // By hand, from the event stream.
     let session = client.start("fake", Config::default()).await.unwrap();
+    let mut events = session.events().await;
     let turn = session.send("needs permission").await.unwrap();
-    let request = first_permission_request(&session).await;
+    let request = first_permission_request(&mut events).await;
     session.deny(&request.id, "not now").await.unwrap();
     assert_eq!(turn.wait().await.unwrap().text, "permission denied");
     assert_eq!(
@@ -66,11 +69,11 @@ async fn permission_requests_are_answered() {
 
     // By the helper on the request itself.
     let turn = session.send("needs permission").await.unwrap();
-    let request = first_permission_request(&session).await;
-    request.allow(&session).await.unwrap();
+    let request = first_request(&mut events).await;
+    request.allow().await.unwrap();
     assert_eq!(turn.wait().await.unwrap().text, "needs permission");
     assert_eq!(
-        request.deny(&session, "too late").await.unwrap_err().kind(),
+        request.deny("too late").await.unwrap_err().kind(),
         ErrorKind::RequestDone
     );
 
@@ -89,11 +92,10 @@ async fn permission_requests_are_answered() {
 }
 
 async fn first_permission_request(
-    session: &agent_cli_connector::Session,
+    events: &mut agent_cli_connector::Events,
 ) -> agent_cli_connector::PermissionRequest {
-    let mut events = session.events().await;
     while let Some(ev) = events.next().await {
-        if let EventPayload::PermissionRequest(r) = ev.payload {
+        if let EventPayload::PermissionRequest(r) = ev.into_event().payload {
             return r;
         }
     }
@@ -155,12 +157,12 @@ async fn agentd_subprocess_runs_a_turn() {
     let client = Client::open(fake().agentd(agentd)).await.unwrap();
     assert_eq!(client.providers()[0].name, "fake");
     let session = client.start("fake", Config::default()).await.unwrap();
+    let mut events = session.events().await;
     assert_eq!(
         session.run("over a pipe").await.unwrap().text,
         "over a pipe"
     );
     session.close().await.unwrap();
-    let mut events = session.events().await;
     let mut completed = false;
     while let Some(ev) = events.next().await {
         completed |= matches!(ev.payload, EventPayload::TurnCompleted(_));
@@ -282,4 +284,170 @@ fn crate_version_names_the_release_it_downloads() {
         env!("CARGO_PKG_VERSION"),
         agent_cli_connector::LIBRARY_VERSION
     );
+}
+
+#[tokio::test]
+async fn dialog_and_native_helpers_answer_from_the_event() {
+    let client = Client::open(fake()).await.unwrap();
+    let session = client.start("fake", Config::default()).await.unwrap();
+    let mut events = session.events().await;
+
+    let turn = session.send("dialog").await.unwrap();
+    let ev = first_request(&mut events).await;
+    assert!(!ev.handled());
+    ev.complete(Some(json!({"ok": 1}))).await.unwrap();
+    assert_eq!(
+        turn.wait().await.unwrap().text,
+        r#"dialog completed {"ok":1}"#
+    );
+
+    let turn = session.send("dialog").await.unwrap();
+    first_request(&mut events).await.cancel().await.unwrap();
+    assert_eq!(turn.wait().await.unwrap().text, "dialog cancelled");
+
+    let turn = session.send("native").await.unwrap();
+    let ev = first_request(&mut events).await;
+    assert!(matches!(&ev.payload, EventPayload::NativeRequest(r) if r.method == "fake/ping"));
+    ev.reply(Some(json!("pong"))).await.unwrap();
+    assert_eq!(turn.wait().await.unwrap().text, r#"native result "pong""#);
+
+    let turn = session.send("native").await.unwrap();
+    first_request(&mut events)
+        .await
+        .fail(7, "nope")
+        .await
+        .unwrap();
+    assert_eq!(turn.wait().await.unwrap().text, "native error 7 nope");
+
+    // A helper for another kind of request fails without sending.
+    let turn = session.send("native").await.unwrap();
+    let ev = first_request(&mut events).await;
+    assert_eq!(
+        ev.allow().await.unwrap_err().kind(),
+        ErrorKind::InvalidParams
+    );
+    ev.reply(None).await.unwrap();
+    assert_eq!(turn.wait().await.unwrap().text, "native result null");
+}
+
+#[tokio::test]
+async fn handled_requests_are_delivered_and_marked() {
+    let client = Client::open(fake()).await.unwrap();
+    let options = SessionOptions::new(Config::default())
+        .on_dialog(|_| async {
+            DialogResponse {
+                behavior: DialogResponseBehavior::Completed,
+                result: Some(json!(2)),
+            }
+        })
+        .on_native_request(|r| async move {
+            NativeResponse {
+                result: Some(json!(r.method)),
+                ..Default::default()
+            }
+        });
+    let session = client.start("fake", options).await.unwrap();
+    let mut events = session.events().await;
+    let turn = session.send("dialog").await.unwrap();
+    assert_eq!(turn.wait().await.unwrap().text, "dialog completed 2");
+    let mut turn_events = turn.events().await;
+    let mut in_turn = false;
+    while let Some(ev) = turn_events.next().await {
+        in_turn |= ev.handled() && matches!(ev.payload, EventPayload::DialogRequest(_));
+    }
+    assert!(in_turn);
+    assert_eq!(
+        session.run("native").await.unwrap().text,
+        r#"native result "fake/ping""#
+    );
+    session.close().await.unwrap();
+    let mut handled = Vec::new();
+    while let Some(ev) = events.next().await {
+        if matches!(
+            ev.payload,
+            EventPayload::DialogRequest(_) | EventPayload::NativeRequest(_)
+        ) {
+            handled.push(ev.handled());
+        }
+    }
+    assert_eq!(handled, [true, true]);
+}
+
+#[tokio::test]
+async fn failing_callbacks_answer_fail_closed() {
+    let client = Client::open(fake()).await.unwrap();
+    let options = SessionOptions::new(Config::default())
+        .on_permission(|_| async { panic!("permission broke") })
+        .on_dialog(|_| async { panic!("dialog broke") })
+        .on_native_request(|_| async { panic!("native broke") });
+    let session = client.start("fake", options).await.unwrap();
+    assert_eq!(
+        session.run("dialog").await.unwrap().text,
+        "dialog cancelled"
+    );
+    assert_eq!(
+        session.run("native").await.unwrap().text,
+        "native error -32603 native broke"
+    );
+    assert_eq!(
+        session.run("needs permission").await.unwrap().text,
+        "permission denied"
+    );
+}
+
+#[tokio::test]
+async fn subscribers_see_every_event_and_events_buffers_lazily() {
+    let client = Client::open(fake()).await.unwrap();
+    let session = client.start("fake", Config::default()).await.unwrap();
+    let seen = Arc::new(Mutex::new(String::new()));
+    let sink = seen.clone();
+    let subscription = session.subscribe(move |ev| {
+        if let EventPayload::TextDelta(d) = &ev.payload {
+            sink.lock().unwrap().push_str(&d.delta);
+        }
+    });
+    let _panicking = session.subscribe(|_| panic!("listener broke"));
+    session.run("before").await.unwrap();
+    let mut events = session.events().await;
+    session.run("after").await.unwrap();
+    subscription.unsubscribe();
+    session.run("ignored").await.unwrap();
+    session.close().await.unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), "beforeafter");
+    let mut text = String::new();
+    while let Some(ev) = events.next().await {
+        if let EventPayload::TextDelta(d) = &ev.payload {
+            text.push_str(&d.delta);
+        }
+    }
+    assert_eq!(text, "afterignored");
+}
+
+async fn first_request(events: &mut agent_cli_connector::Events) -> SessionEvent {
+    while let Some(ev) = events.next().await {
+        if matches!(
+            ev.payload,
+            EventPayload::PermissionRequest(_)
+                | EventPayload::DialogRequest(_)
+                | EventPayload::NativeRequest(_)
+        ) {
+            return ev;
+        }
+    }
+    panic!("the session closed before a request");
+}
+
+#[tokio::test]
+async fn the_session_stream_starts_with_session_started() {
+    let client = Client::open(fake()).await.unwrap();
+    let session = client.start("fake", Config::default()).await.unwrap();
+    session.run("before the stream").await.unwrap();
+    let mut events = session.events().await;
+    let first = events.next().await.unwrap();
+    assert!(matches!(first.payload, EventPayload::SessionStarted(_)));
+    session.close().await.unwrap();
+    while let Some(ev) = events.next().await {
+        assert!(!matches!(ev.payload, EventPayload::TextDelta(_)));
+    }
 }

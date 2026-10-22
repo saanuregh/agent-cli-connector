@@ -277,7 +277,7 @@ func (a *app) command(name, args string) {
 	case "transcript":
 		n := positiveOr(args, 20)
 		a.mu.Lock()
-		items := slices.Clone(a.items)
+		items := a.transcript.Items()
 		a.mu.Unlock()
 		a.showItems(items[max(0, len(items)-n):])
 	case "usage":
@@ -531,7 +531,8 @@ func (a *app) turnChoices(sess *agent.Session) []turnChoice {
 
 func (a *app) rewindCommand(sess *agent.Session, args string) {
 	if turn, ok := a.chooseTurn(sess, args, "/rewind n drops turn n and everything after it"); ok {
-		a.report(sess.Rewind(a.ctx, turn))
+		_, err := sess.Rewind(a.ctx, turn)
+		a.report(err)
 	}
 }
 

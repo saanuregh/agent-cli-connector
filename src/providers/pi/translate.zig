@@ -149,11 +149,15 @@ pub const Translator = struct {
             },
             .agent_start => {
                 // A run the host did not start, such as one an extension
-                // triggered, becomes a tracked turn.
-                const current = pi.rt().runStarted("")[0];
+                // triggered, becomes a tracked turn. Host input in flight
+                // makes the runtime busy or the run's start pending.
+                const unsolicited = pi.rt().idle();
+                const current, const starting = pi.rt().runStarted("");
                 if (translator.run.cycle_started) return;
                 translator.run.cycle_started = true;
-                translator.emitTurn(current.slice(), raw, .{ .turn_started = .{} });
+                translator.emitTurn(current.slice(), raw, .{ .turn_started = .{
+                    .origin = if (unsolicited and !starting) "extension" else "",
+                } });
                 translator.emitTurn(current.slice(), raw, .{ .status_changed = .{ .status = .running } });
             },
             .turn_start => translator.run.steps += 1,
@@ -309,7 +313,6 @@ pub const Translator = struct {
         var usage = translator.run.usage;
         usage.add(decode.usage(fields));
         usage.context_tokens = decode.contextTokens(fields);
-        usage.context_window = translator.pi.contextWindow();
         translator.emit(raw, .{ .usage_updated = .{ .usage = usage } });
     }
 
@@ -317,7 +320,7 @@ pub const Translator = struct {
     fn turnUsage(translator: *Translator) types.Usage {
         var usage = translator.run.usage;
         usage.context_tokens = translator.context_tokens;
-        usage.context_window = translator.pi.contextWindow();
+        usage.context_window = translator.pi.rt().contextWindow();
         return usage;
     }
 

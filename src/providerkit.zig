@@ -66,6 +66,7 @@ pub fn inheritConfig(cfg: types.Config, base: types.Config, live: types.SessionI
     if (cfg.additional_directories.len == 0) out.additional_directories = base.additional_directories;
     if (cfg.env == null) out.env = base.env;
     if (cfg.unset_env.len == 0) out.unset_env = base.unset_env;
+    if (cfg.command_prefix.len == 0) out.command_prefix = base.command_prefix;
     if (cfg.event_buffer_limit == 0) out.event_buffer_limit = base.event_buffer_limit;
     out.wire_tap = cfg.wire_tap or base.wire_tap;
     out.include_raw = cfg.include_raw or base.include_raw;

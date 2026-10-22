@@ -80,6 +80,23 @@ impl Client {
         };
         self.request(method::PROVIDER_LIST_SUBAGENTS, params).await
     }
+
+    /// Sends a native request that needs no session, such as a Codex app-server
+    /// method like `account/read`, and returns the harness's answer. A null
+    /// `params` sends none.
+    pub async fn call(
+        &self,
+        provider: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let params = ProviderCallParams {
+            provider: provider.into(),
+            method: method.into(),
+            params: (!params.is_null()).then_some(params),
+        };
+        self.request(method::PROVIDER_CALL, params).await
+    }
 }
 
 impl Session {
@@ -89,6 +106,15 @@ impl Session {
             session: self.session_handle(),
         };
         self.request(method::SESSION_INFO, params).await
+    }
+
+    /// Reads a snapshot of the session: status, running and queued turns,
+    /// unfinished tasks, pending requests, usage, and info.
+    pub async fn state(&self) -> Result<SessionState> {
+        let params = SessionParams {
+            session: self.session_handle(),
+        };
+        self.request(method::SESSION_STATE, params).await
     }
 
     /// Stops the running turn. Queued input still runs afterwards.
@@ -159,9 +185,10 @@ impl Session {
         self.request(method::SESSION_COMPACT, params).await
     }
 
-    /// Drops a turn and every later turn from the conversation. File changes
-    /// are not undone.
-    pub async fn rewind(&self, turn_id: &str) -> Result<()> {
+    /// Drops a turn and every later turn from the conversation and returns the
+    /// session ID afterwards, which changes on some harnesses. File changes are
+    /// not undone.
+    pub async fn rewind(&self, turn_id: &str) -> Result<RewindResult> {
         let params = TurnParams {
             session: self.session_handle(),
             turn_id: turn_id.into(),

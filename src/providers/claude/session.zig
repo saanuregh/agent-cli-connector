@@ -21,6 +21,7 @@ const control = @import("control.zig");
 const launch_mod = @import("launch.zig");
 const permissions = @import("permissions.zig");
 const rewind_mod = @import("rewind.zig");
+const history = @import("history.zig");
 const Translator = @import("translate.zig").Translator;
 const Provider = @import("provider.zig").Provider;
 
@@ -30,6 +31,8 @@ const log = std.log.scoped(.agent);
 /// The first Claude Code version that honors the per-tool permission
 /// policies `ToolDef.needs_approval` relies on.
 const min_tool_policy_version = "2.1.301";
+/// Bounds the get_context_usage request at start, like the effort read.
+const context_usage_timeout_ms = 3000;
 
 pub const provider_capabilities: types.Capabilities = .{
     .streaming = true,
@@ -67,12 +70,25 @@ pub const provider_capabilities: types.Capabilities = .{
     .rate_limits = true,
     .hooks = true,
     .goals = true,
+    // Only with SessionOptions.tail_shell_output; set per session.
+    .tool_output_stream = false,
+    .plan_stream = false,
+    // A rewind the CLI cannot do in place restarts it, and restarting at
+    // the first turn starts a new session.
+    .rewind_changes_session_id = true,
+    .requests_from_subagents = true,
+    .background_turns = true,
+    // Steered input waits for the running tool call ("next").
+    .steer_interrupts_tools = false,
+    .dialogs = true,
+    .native_requests = false,
     .check = true,
     .list_models = true,
     .list_sessions = true,
     .read_history = true,
     .delete_session = true,
     .list_subagents = true,
+    .provider_call = false,
 };
 
 /// One run of the CLI and the state that lives as long as it. A restarting
@@ -412,12 +428,17 @@ pub const ClaudeSession = struct {
     /// Sets one field of the session info to a copy of `value` and
     /// announces it.
     pub fn setInfoField(claude: *ClaudeSession, comptime field: []const u8, value: @FieldType(types.SessionInfo, field)) void {
+        claude.setInfoFieldFor(field, value, .reset);
+    }
+
+    /// Like `setInfoField`; a session ID change reports `reason`.
+    pub fn setInfoFieldFor(claude: *ClaudeSession, comptime field: []const u8, value: @FieldType(types.SessionInfo, field), reason: types.SessionIdChangedReason) void {
         const Change = struct {
             fn apply(new_value: @TypeOf(value), info: *types.SessionInfo, a: Allocator) Allocator.Error!void {
                 @field(info, field) = try agent.clone(@TypeOf(value), a, new_value);
             }
         };
-        claude.rt().updateInfo(value, true, Change.apply) catch log.err("claude: out of memory: session info update lost", .{});
+        claude.rt().updateInfoFor(value, true, reason, Change.apply) catch log.err("claude: out of memory: session info update lost", .{});
     }
 
     /// A copy of the latest initialize response in `a`.
@@ -474,6 +495,7 @@ pub fn start(provider: *Provider, start_options: agent.StartOptions, skip_applie
         caps.reasoning_stream = false;
     }
     if (claude.opts.no_permission_prompts or claude.opts.permission_prompt_tool.len > 0) caps.permission_prompt = false;
+    caps.tool_output_stream = claude.opts.tail_shell_output;
     var session_start_options = start_options;
     session_start_options.config = claude.cfg;
     claude.session = .init(provider.env, name, &ClaudeSession.vtable, caps, session_start_options);
@@ -499,7 +521,6 @@ fn startSession(claude: *ClaudeSession, diag: ?*Diagnostics) errors.Error!void {
     if (cfg.fork and cfg.resume_id.len == 0 and !claude.opts.@"continue") return errors.fail(diag, .invalid_params, "claude: fork requires resume_id", .{});
     if (cfg.session_id.len > 0 and !kit.isUuid(cfg.session_id)) return errors.fail(diag, .invalid_params, "claude: session_id must be a UUID", .{});
     if (claude.opts.@"continue" and cfg.resume_id.len == 0) {
-        const history = @import("history.zig");
         if (history.latestSessionId(provider, a, cfg.*)) |latest| cfg.resume_id = latest;
     }
     if (cfg.fork_at_turn.len > 0) {
@@ -532,6 +553,15 @@ fn startSession(claude: *ClaudeSession, diag: ?*Diagnostics) errors.Error!void {
         return errors.fail(diag, .unsupported, "claude: host tools with needs_approval need Claude Code {s} or newer to be enforced (found {s})", .{ min_tool_policy_version, version });
     }
     const native_mode = init_response.str("current_permission_mode");
+    var context_window: i64 = 0;
+    if (!claude.skip_applied_effort) {
+        // "summary" answers from local estimates, without token-count
+        // calls. Without an answer the window stays unknown until the
+        // first turn's usage, so the failure's details are not needed.
+        if (control.control(claude, scratch_allocator, "get_context_usage", RawJson.of("{\"detail\":\"summary\"}"), .{ .timeout_ms = context_usage_timeout_ms }, null)) |usage| {
+            context_window = JsonView.parseBytes(scratch_allocator, usage).int("maxTokens");
+        } else |_| {}
+    }
     const info: types.SessionInfo = .{
         .id = session_id,
         .provider = name,
@@ -542,6 +572,7 @@ fn startSession(claude: *ClaudeSession, diag: ?*Diagnostics) errors.Error!void {
         .title = cfg.title,
         .version = version,
         .commands = try control.slashCommands(scratch_allocator, init_response.get("commands")),
+        .context_window = context_window,
         .raw = RawJson.of(init.raw),
     };
     claude.rt().markStarted(info, cfg.resume_id.len > 0);
@@ -572,7 +603,7 @@ fn send(s: *Session, in: types.Input, turn_id: []const u8, diag: ?*Diagnostics) 
     if (in.model.len > 0) try setModel(s, in.model, diag);
     if (in.effort.len > 0) try setEffort(s, in.effort, diag);
     const content = try encodeContent(claude, a, try in.allParts(a), diag);
-    try s.rt.newTurn(turn_id, diag);
+    try s.rt.newTurnFor(turn_id, .{ .client_id = in.client_id }, diag);
 
     var message: ObjectBuilder = .init(a);
     try message.str("role", "user");
@@ -824,7 +855,9 @@ fn stopTask(s: *Session, task_id: []const u8, diag: ?*Diagnostics) errors.Error!
 }
 
 /// Starts a new session that continues this conversation. Empty fields of
-/// the config are taken from this session.
+/// the config are taken from this session. The fork's transcript is
+/// written before it starts, so it persists even if it never runs a turn;
+/// an ephemeral fork is the CLI's own unsaved fork instead.
 fn fork(s: *Session, start_options: agent.StartOptions, diag: ?*Diagnostics) errors.Error!*Session {
     const claude = ClaudeSession.of(s);
     if (claude.cfg.ephemeral) return errors.unsupported(diag, name, "forking an ephemeral session");
@@ -833,19 +866,50 @@ fn fork(s: *Session, start_options: agent.StartOptions, diag: ?*Diagnostics) err
     const a = arena.allocator();
     const live = try s.rt.sessionInfo(a);
     var cfg = kit.inheritConfig(start_options.config, claude.cfg, live);
-    cfg.resume_id = try claude.sessionId(a);
+    const parent_id = try claude.sessionId(a);
+    cfg.resume_id = parent_id;
     cfg.fork = true;
     cfg.session_id = start_options.config.session_id;
     cfg.title = start_options.config.title;
+    // The parent's transcript, read once for the cut point; unread
+    // without fork_at_turn, and an ephemeral fork needs none.
+    var parent_graph: ?history.Graph = null;
     if (cfg.fork_at_turn.len > 0) {
+        parent_graph = history.loadTranscript(claude.provider, a, claude.cfg, parent_id, null) catch null;
         // A turn of this session forks at its latest main assistant
         // message, once that message has reached the transcript.
         const cursor = try claude.translator().cursor(a, cfg.fork_at_turn);
-        if (cursor.len > 0 and rewind_mod.transcriptHas(claude.provider, a, claude.cfg, cfg.resume_id, cursor)) cfg.fork_at_turn = cursor;
+        if (cursor.len > 0) if (parent_graph) |graph| if (graph.by_id.contains(cursor)) {
+            cfg.fork_at_turn = cursor;
+        };
     }
     var next = start_options;
+    if (cfg.ephemeral) {
+        next.config = cfg;
+        return start(claude.provider, next, false, diag);
+    }
+    const up_to = if (cfg.fork_at_turn.len > 0) blk: {
+        const graph = parent_graph orelse try history.loadTranscript(claude.provider, a, claude.cfg, parent_id, diag);
+        break :blk try graph.forkPoint(a, cfg.fork_at_turn, diag);
+    } else "";
+    const fork_id = try history.forkTranscript(claude.provider, a, claude.cfg, parent_id, .{
+        .up_to_message_id = up_to,
+        .title = cfg.title,
+        .session_id = cfg.session_id,
+    }, diag);
+    cfg.resume_id = fork_id;
+    cfg.fork = false;
+    cfg.fork_at_turn = "";
+    cfg.session_id = "";
     next.config = cfg;
-    return start(claude.provider, next, false, diag);
+    return start(claude.provider, next, false, diag) catch |e| {
+        // The fork did not start: its transcript would be an orphan.
+        if (history.findTranscript(claude.provider, a, claude.cfg, fork_id, claude.cfg.cwd, null)) |path| {
+            Io.Dir.cwd().deleteFile(claude.io(), path) catch |delete_error|
+                log.err("claude: the transcript of fork {s}, which did not start, was not deleted: {t}", .{ fork_id, delete_error });
+        } else |_| {}
+        return e;
+    };
 }
 
 // ---------------------------------------------------------------- the end

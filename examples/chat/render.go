@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -50,14 +49,7 @@ type renderState struct {
 
 // record keeps the transcript items /transcript shows. a.mu is held.
 func (a *app) record(ev agent.Event) {
-	switch p := ev.Payload.(type) {
-	case agent.ItemCompleted:
-		a.items = append(a.items, p.Item)
-	case agent.ItemsRemoved:
-		a.items = slices.DeleteFunc(a.items, func(it agent.Item) bool { return slices.Contains(p.Ids, it.ID) })
-	case agent.ConversationReset:
-		a.items = nil
-	}
+	a.transcript.Apply(ev)
 }
 
 // show prints the events a person following the chat cares about.

@@ -58,14 +58,14 @@ async fn run(options: Options, provider: &str, prompt: &str) -> agent_cli_connec
     let mut out = std::io::stdout();
     let mut events = turn.events().await;
     while let Some(ev) = events.next().await {
-        match ev.payload {
+        match &ev.payload {
             // An empty parent_id: not a subagent's text.
             EventPayload::TextDelta(d) if d.parent_id.is_empty() => {
                 let _ = out.write_all(d.delta.as_bytes());
                 let _ = out.flush();
             }
             EventPayload::ItemStarted(s) => {
-                if let Some(tool) = s.item.tool {
+                if let Some(tool) = &s.item.tool {
                     eprintln!("[{:?} {}]", tool.kind, tool.name);
                 }
             }

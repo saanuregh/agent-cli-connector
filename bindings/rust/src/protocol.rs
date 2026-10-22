@@ -2,7 +2,7 @@
 
 /// The library version these bindings were generated from; release files
 /// are downloaded for it.
-pub const LIBRARY_VERSION: &str = "0.2.0";
+pub const LIBRARY_VERSION: &str = "0.3.0";
 
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -21,11 +21,13 @@ pub mod method {
     pub const PROVIDER_READ_HISTORY: &str = "provider/readHistory";
     pub const PROVIDER_DELETE_SESSION: &str = "provider/deleteSession";
     pub const PROVIDER_LIST_SUBAGENTS: &str = "provider/listSubagents";
+    pub const PROVIDER_CALL: &str = "provider/call";
     pub const SESSION_START: &str = "session/start";
     pub const SESSION_FORK: &str = "session/fork";
     pub const SESSION_SEND: &str = "session/send";
     pub const SESSION_WAIT: &str = "session/wait";
     pub const SESSION_INFO: &str = "session/info";
+    pub const SESSION_STATE: &str = "session/state";
     pub const SESSION_INTERRUPT: &str = "session/interrupt";
     pub const SESSION_INTERRUPT_TURN: &str = "session/interruptTurn";
     pub const SESSION_SET_MODEL: &str = "session/setModel";
@@ -234,6 +236,22 @@ pub struct Capabilities {
     #[serde(skip_serializing_if = "is_default")]
     pub goals: bool,
     #[serde(skip_serializing_if = "is_default")]
+    pub tool_output_stream: bool,
+    #[serde(skip_serializing_if = "is_default")]
+    pub plan_stream: bool,
+    #[serde(skip_serializing_if = "is_default")]
+    pub rewind_changes_session_id: bool,
+    #[serde(skip_serializing_if = "is_default")]
+    pub requests_from_subagents: bool,
+    #[serde(skip_serializing_if = "is_default")]
+    pub background_turns: bool,
+    #[serde(skip_serializing_if = "is_default")]
+    pub steer_interrupts_tools: bool,
+    #[serde(skip_serializing_if = "is_default")]
+    pub dialogs: bool,
+    #[serde(skip_serializing_if = "is_default")]
+    pub native_requests: bool,
+    #[serde(skip_serializing_if = "is_default")]
     pub check: bool,
     #[serde(skip_serializing_if = "is_default")]
     pub list_models: bool,
@@ -245,6 +263,8 @@ pub struct Capabilities {
     pub delete_session: bool,
     #[serde(skip_serializing_if = "is_default")]
     pub list_subagents: bool,
+    #[serde(skip_serializing_if = "is_default")]
+    pub provider_call: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -314,6 +334,15 @@ pub struct ListSubagentsParams {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct ProviderCallParams {
+    pub provider: String,
+    pub method: String,
+    #[serde(skip_serializing_if = "is_default")]
+    pub params: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StartParams {
     pub provider: String,
     #[serde(skip_serializing_if = "is_default")]
@@ -365,6 +394,8 @@ pub struct Config {
     pub env: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "is_default")]
     pub unset_env: Vec<String>,
+    #[serde(skip_serializing_if = "is_default")]
+    pub command_prefix: Vec<String>,
     #[serde(skip_serializing_if = "is_default")]
     pub event_buffer_limit: i64,
     #[serde(skip_serializing_if = "is_default")]
@@ -484,6 +515,8 @@ pub struct SessionInfo {
     pub commands: Vec<SlashCommand>,
     #[serde(skip_serializing_if = "is_default")]
     pub mcp_servers: Vec<McpServerStatus>,
+    #[serde(skip_serializing_if = "is_default")]
+    pub context_window: i64,
     #[serde(skip_serializing_if = "is_default")]
     pub raw: Option<serde_json::Value>,
 }
@@ -667,6 +700,10 @@ pub struct RespondParams {
     pub user_input: Option<UserInputResponse>,
     #[serde(skip_serializing_if = "is_default")]
     pub elicitation: Option<ElicitationResponse>,
+    #[serde(skip_serializing_if = "is_default")]
+    pub dialog: Option<DialogResponse>,
+    #[serde(skip_serializing_if = "is_default")]
+    pub native: Option<NativeResponse>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -722,6 +759,49 @@ pub enum ElicitationResponseAction {
     Cancel,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DialogResponse {
+    #[serde(skip_serializing_if = "is_default")]
+    pub behavior: DialogResponseBehavior,
+    #[serde(skip_serializing_if = "is_default")]
+    pub result: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DialogResponseBehavior {
+    Completed,
+    #[default]
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NativeResponse {
+    #[serde(skip_serializing_if = "is_default")]
+    pub result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "is_default")]
+    pub error: Option<NativeResponseError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NativeResponseError {
+    pub code: i64,
+    #[serde(skip_serializing_if = "is_default")]
+    pub message: String,
+}
+
+impl Default for NativeResponseError {
+    fn default() -> Self {
+        Self {
+            code: -32603,
+            message: Default::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventNotification {
     #[serde(default)]
@@ -771,11 +851,14 @@ pub enum EventPayload {
     PermissionRequest(PermissionRequest),
     UserInputRequest(UserInputRequest),
     ElicitationRequest(ElicitationRequest),
+    DialogRequest(DialogRequest),
+    NativeRequest(NativeRequest),
     RequestResolved(RequestResolved),
     RateLimitUpdated(RateLimitUpdated),
     HookRun(HookRun),
     GoalUpdated(GoalUpdated),
     ConversationReset(ConversationReset),
+    SessionIdChanged(SessionIdChanged),
     ItemsRemoved(ItemsRemoved),
     EventsDropped(EventsDropped),
     Native(Native),
@@ -817,7 +900,15 @@ pub enum SessionStatus {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct TurnStarted {}
+#[serde(default)]
+pub struct TurnStarted {
+    #[serde(skip_serializing_if = "is_default")]
+    pub native_turn_id: String,
+    #[serde(skip_serializing_if = "is_default")]
+    pub origin: String,
+    #[serde(skip_serializing_if = "is_default")]
+    pub client_id: String,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1505,6 +1596,34 @@ impl Default for ElicitationRequest {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct DialogRequest {
+    #[serde(skip_serializing_if = "is_default")]
+    pub id: String,
+    #[serde(skip_serializing_if = "is_default")]
+    pub kind: String,
+    #[serde(skip_serializing_if = "is_default")]
+    pub data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "is_default")]
+    pub tool_use_id: String,
+    #[serde(skip_serializing_if = "is_default")]
+    pub subagent_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NativeRequest {
+    #[serde(skip_serializing_if = "is_default")]
+    pub id: String,
+    #[serde(skip_serializing_if = "is_default")]
+    pub method: String,
+    #[serde(skip_serializing_if = "is_default")]
+    pub params: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "is_default")]
+    pub subagent_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RequestResolved {
     pub request_id: String,
     pub kind: RequestKind,
@@ -1518,6 +1637,8 @@ pub enum RequestKind {
     Permission,
     UserInput,
     Elicitation,
+    Dialog,
+    Native,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1626,6 +1747,26 @@ pub struct ConversationReset {
     pub trigger: String,
     #[serde(skip_serializing_if = "is_default")]
     pub new_session_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionIdChanged {
+    #[serde(skip_serializing_if = "is_default")]
+    pub previous_id: String,
+    #[serde(skip_serializing_if = "is_default")]
+    pub id: String,
+    #[serde(skip_serializing_if = "is_default")]
+    pub reason: SessionIdChangedReason,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionIdChangedReason {
+    #[default]
+    Reset,
+    Rewind,
+    Resume,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1828,6 +1969,8 @@ pub struct ClaudeSessionOptions {
     #[serde(skip_serializing_if = "is_default")]
     pub tool_config: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "is_default")]
+    pub supported_dialog_kinds: Vec<String>,
+    #[serde(skip_serializing_if = "is_default")]
     pub tool_server_name: String,
     #[serde(skip_serializing_if = "is_default")]
     pub tool_timeout_ms: i64,
@@ -1895,6 +2038,8 @@ pub struct CodexOptions {
     pub disable: Vec<String>,
     #[serde(skip_serializing_if = "is_default")]
     pub extra_args: Vec<String>,
+    #[serde(skip_serializing_if = "is_default")]
+    pub command_prefix: Vec<String>,
     #[serde(skip_serializing_if = "is_default")]
     pub startup_timeout_ms: i64,
     #[serde(skip_serializing_if = "is_default")]
@@ -2131,6 +2276,38 @@ pub struct SessionSummary {
     pub last_prompt: String,
     #[serde(skip_serializing_if = "is_default")]
     pub raw: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionState {
+    #[serde(skip_serializing_if = "is_default")]
+    pub status: SessionStatus,
+    #[serde(skip_serializing_if = "is_default")]
+    pub running_turn_id: String,
+    #[serde(skip_serializing_if = "is_default")]
+    pub queued_turn_ids: Vec<String>,
+    #[serde(skip_serializing_if = "is_default")]
+    pub tasks: Vec<Task>,
+    #[serde(skip_serializing_if = "is_default")]
+    pub pending_requests: Vec<Event>,
+    #[serde(skip_serializing_if = "is_default")]
+    pub usage: Usage,
+    #[serde(skip_serializing_if = "is_default")]
+    pub info: SessionInfo,
+    #[serde(skip_serializing_if = "is_default")]
+    pub background_work: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RewindResult {
+    #[serde(skip_serializing_if = "is_default")]
+    pub session_id: String,
+    #[serde(skip_serializing_if = "is_default")]
+    pub forked: bool,
+    #[serde(skip_serializing_if = "is_default")]
+    pub removed_item_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

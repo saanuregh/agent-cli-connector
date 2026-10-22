@@ -77,7 +77,6 @@ pub const PiSession = struct {
     mutex: Io.Mutex = .init,
     mode: []const u8 = "",
     model_provider: Id = .{},
-    window: i64 = 0,
     /// Whether the current model takes images; null when unknown.
     model_images: ?bool = null,
     /// allow_session grants by grant key.
@@ -137,12 +136,6 @@ pub const PiSession = struct {
 
     pub fn unlock(pi: *PiSession) void {
         pi.mutex.unlock(pi.io);
-    }
-
-    pub fn contextWindow(pi: *PiSession) i64 {
-        pi.lock();
-        defer pi.unlock();
-        return pi.window;
     }
 
     pub fn permissionMode(pi: *PiSession) []const u8 {
@@ -1225,6 +1218,7 @@ fn respond(session: *Session, pending: *const Session.Pending, response: types.R
             return pi.uiRespond(answer.ui, .{ .value = try std.mem.join(a, "\n", answers) }, diag);
         },
         .elicitation => return errors.fail(diag, .invalid_answer, "pi: no elicitation requests", .{}),
+        .dialog, .native => return errors.fail(diag, .invalid_answer, "pi: no dialog or native requests", .{}),
     }
 }
 
@@ -1272,6 +1266,7 @@ fn destroy(session: *Session) void {
 /// Launches a session. Returns once Pi answered its first command, so
 /// startup failures surface here.
 pub fn start(provider: *Provider, opts: agent.StartOptions, diag: ?*Diagnostics) Error!*Session {
+    try provider.requireVersion(diag);
     const gpa = provider.env.gpa;
     const pi = try gpa.create(PiSession);
     pi.* = .{
@@ -1366,12 +1361,11 @@ fn startSession(pi: *PiSession, diag: ?*Diagnostics) Error!void {
         for (m.map.keys(), m.map.values()) |key, value| try env_map.map.put(ca, key, value);
     };
     const args = try buildArgs(pi, ca, &env_map, diag);
-    const argv = try a.alloc([]const u8, args.len + 1);
-    argv[0] = pi.provider.path();
-    @memcpy(argv[1..], args);
+    const argv = try std.mem.concat(a, []const u8, &.{ &.{pi.provider.path()}, args });
     pi.proc = try Process.start(pi.env(), .{
         .provider = name,
         .argv = argv,
+        .command_prefix = cfg.command_prefix,
         .cwd = cfg.cwd,
         .env = env_map,
         .unset_env = cfg.unset_env,
@@ -1389,7 +1383,7 @@ fn startSession(pi: *PiSession, diag: ?*Diagnostics) Error!void {
         }
         return errors.failWith(diag, .{ .kind = info.kind, .message = try std.fmt.allocPrint(a, "pi: start: {s}", .{info.message}), .code = info.code });
     };
-    try control.applyState(pi, a, state, false);
+    try control.applyState(pi, a, state, false, .reset);
     // A resumed session file runs in the directory its header records.
     try control.followSessionCwd(pi, a, state.str("sessionFile"));
     try control.applyStartupSettings(pi, diag);

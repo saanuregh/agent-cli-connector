@@ -1,7 +1,7 @@
 //! The public interfaces: a `Provider` starts `Session`s for one harness. A
 //! session is one live conversation. Input goes in with `send` or `run`,
 //! events come out of `nextEvent`, and requests (permissions, questions,
-//! elicitations) are answered with `respond`.
+//! elicitations, dialogs, native requests) are answered with `respond`.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -42,12 +42,16 @@ pub const RequestHandler = struct {
     permission: ?*const fn (context: ?*anyopaque, req: *const types.PermissionRequest) types.PermissionResponse = null,
     user_input: ?*const fn (context: ?*anyopaque, req: *const types.UserInputRequest) types.UserInputResponse = null,
     elicitation: ?*const fn (context: ?*anyopaque, req: *const types.ElicitationRequest) types.ElicitationResponse = null,
+    dialog: ?*const fn (context: ?*anyopaque, req: *const types.DialogRequest) types.DialogResponse = null,
+    native: ?*const fn (context: ?*anyopaque, req: *const types.NativeRequest) types.NativeResponse = null,
 
     fn handles(h: RequestHandler, kind: types.RequestKind) bool {
         return switch (kind) {
             .permission => h.permission != null,
             .user_input => h.user_input != null,
             .elicitation => h.elicitation != null,
+            .dialog => h.dialog != null,
+            .native => h.native != null,
         };
     }
 };
@@ -91,7 +95,9 @@ pub const Session = struct {
         set_permission_mode: ?*const fn (s: *Session, mode: types.PermissionMode, diag: ?*Diagnostics) Error!void = null,
         set_title: ?*const fn (s: *Session, title: []const u8, diag: ?*Diagnostics) Error!void = null,
         compact: ?*const fn (s: *Session, instructions: []const u8, diag: ?*Diagnostics) Error!void = null,
-        rewind: ?*const fn (s: *Session, turn_id: []const u8, diag: ?*Diagnostics) Error!void = null,
+        /// Allocates the result from `a`; an empty `session_id` means the
+        /// session ID did not change.
+        rewind: ?*const fn (s: *Session, turn_id: []const u8, a: Allocator, diag: ?*Diagnostics) Error!types.RewindResult = null,
         stop_task: ?*const fn (s: *Session, task_id: []const u8, diag: ?*Diagnostics) Error!void = null,
         fork: ?*const fn (s: *Session, opts: StartOptions, diag: ?*Diagnostics) Error!*Session = null,
         rate_limits: ?*const fn (s: *Session, a: Allocator, diag: ?*Diagnostics) Error![]const types.RateLimit = null,
@@ -136,11 +142,17 @@ pub const Session = struct {
         return s.rt.sessionInfo(a);
     }
 
+    /// A snapshot of the session: status, running and queued turns,
+    /// unfinished tasks, pending requests, usage, and info.
+    pub fn state(s: *Session, a: Allocator) Allocator.Error!types.SessionState {
+        return s.rt.sessionState(a);
+    }
+
     /// Waits up to `timeout` for the next event. Free it with `destroy`.
     /// Each event is delivered once: events a `Turn.nextEvent` took are not
     /// here, and session-level events (`session_started`, `session_updated`,
-    /// `wire`) are only here, so read them now and then when using turns
-    /// with a long-lived session.
+    /// `session_id_changed`, `wire`) are only here, so read them now and
+    /// then when using turns with a long-lived session.
     pub fn nextEvent(s: *Session, timeout: Io.Timeout) NextEventError!*OwnedEvent {
         return s.rt.nextEvent(timeout);
     }
@@ -224,11 +236,17 @@ pub const Session = struct {
     }
 
     /// Drops `turn_id` and every later turn from the conversation. File
-    /// changes are not undone.
-    pub fn rewind(s: *Session, turn_id: []const u8, diag: ?*Diagnostics) Error!void {
+    /// changes are not undone. The result, allocated from `a`, has the
+    /// session ID afterwards, which changes on some harnesses
+    /// (`Capabilities.rewind_changes_session_id`).
+    pub fn rewind(s: *Session, turn_id: []const u8, a: Allocator, diag: ?*Diagnostics) Error!types.RewindResult {
         try checkId(turn_id, diag);
+        try s.rt.ensureOpen(diag);
+        const f = s.vtable.rewind orelse return s.unsupported("rewind", diag);
         const native = s.rt.nativeTurnId(turn_id);
-        return s.optional("rewind", s.vtable.rewind, .{native.slice()}, diag);
+        var res = try f(s, native.slice(), a, diag);
+        if (res.session_id.len == 0) res.session_id = try s.rt.sessionId(a);
+        return res;
     }
 
     /// Stops one background task, such as a subagent.
@@ -353,6 +371,8 @@ pub const Session = struct {
             .permission_request => |*req| .{ .permission = h.permission.?(h.context, req) },
             .user_input_request => |*req| .{ .user_input = h.user_input.?(h.context, req) },
             .elicitation_request => |*req| .{ .elicitation = h.elicitation.?(h.context, req) },
+            .dialog_request => |*req| .{ .dialog = h.dialog.?(h.context, req) },
+            .native_request => |*req| .{ .native = h.native.?(h.context, req) },
             else => return,
         };
         var diag: Diagnostics = .{};
@@ -419,6 +439,8 @@ fn validate(p: *const Session.Pending, resp: types.Response, diag: ?*Diagnostics
         },
         .user_input => if (p.kind != .user_input) return mismatch(p, diag),
         .elicitation => if (p.kind != .elicitation) return mismatch(p, diag),
+        .dialog => if (p.kind != .dialog) return mismatch(p, diag),
+        .native => if (p.kind != .native) return mismatch(p, diag),
     }
 }
 
@@ -443,6 +465,9 @@ pub const Provider = struct {
         read_history: ?*const fn (ptr: *anyopaque, a: Allocator, session_id: []const u8, opts: types.ReadHistoryOptions, diag: ?*Diagnostics) Error![]const types.Item = null,
         delete_session: ?*const fn (ptr: *anyopaque, session_id: []const u8, cwd: []const u8, diag: ?*Diagnostics) Error!void = null,
         list_subagents: ?*const fn (ptr: *anyopaque, a: Allocator, session_id: []const u8, cwd: []const u8, diag: ?*Diagnostics) Error![]const types.Task = null,
+        /// Sends a native request that needs no session, such as a Codex
+        /// app-server method.
+        call: ?*const fn (ptr: *anyopaque, method: []const u8, params: ?RawJson, a: Allocator, diag: ?*Diagnostics) Error!?RawJson = null,
     };
 
     pub fn name(p: Provider) []const u8 {
@@ -494,6 +519,13 @@ pub const Provider = struct {
     pub fn listSubagents(p: Provider, a: Allocator, session_id: []const u8, cwd: []const u8, diag: ?*Diagnostics) Error![]const types.Task {
         const f = p.vtable.list_subagents orelse return errors.unsupported(diag, p.name(), "list_subagents");
         return f(p.ptr, a, session_id, cwd, diag);
+    }
+
+    /// Sends a native request without a session and returns the harness's
+    /// answer, such as Codex's `account/read`.
+    pub fn call(p: Provider, method: []const u8, params: ?RawJson, a: Allocator, diag: ?*Diagnostics) Error!?RawJson {
+        const f = p.vtable.call orelse return errors.unsupported(diag, p.name(), "call");
+        return f(p.ptr, method, params, a, diag);
     }
 
     pub fn deinit(p: Provider) void {

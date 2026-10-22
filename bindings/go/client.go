@@ -184,7 +184,9 @@ func WithTools(tools ...Tool) SessionOption {
 	return func(o *sessionOptions) { o.tools, o.toolsSet = append(o.tools, tools...), true }
 }
 
-// WithHandlers answers requests with callbacks instead of events.
+// WithHandlers answers requests with callbacks. The requests are still
+// delivered as events; Session.Handled reports which ones a handler
+// answers.
 func WithHandlers(h Handlers) SessionOption {
 	return func(o *sessionOptions) { o.handlers, o.handlersSet = h, true }
 }

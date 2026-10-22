@@ -57,6 +57,7 @@ pub fn launch(claude: *ClaudeSession, a: Allocator, cfg: types.Config, session_o
     const next = try session_mod.spawnLaunch(claude, .{
         .provider = name,
         .argv = argv,
+        .command_prefix = cfg.command_prefix,
         .cwd = cfg.cwd,
         .env = try buildEnv(claude, a, cfg, session_options),
         .unset_env = unset.items,
@@ -424,5 +425,6 @@ pub fn initializeRequest(claude: *ClaudeSession, a: Allocator, cfg: types.Config
     if (session_options.agent_progress_summaries) try request.put("agentProgressSummaries", .{ .bool = true });
     try request.put("forwardSubagentText", .{ .bool = !session_options.hide_subagent_text });
     if (!session_options.no_per_task_stop_affordance) try request.put("perTaskStopAffordance", .{ .bool = true });
+    if (session_options.supported_dialog_kinds.len > 0) try request.put("supportedDialogKinds", try agent.json.stringArray(a, session_options.supported_dialog_kinds));
     return agent.json.mergeObject(a, try agent.json.encodeValue(a, request.value()), session_options.initialize_extra);
 }

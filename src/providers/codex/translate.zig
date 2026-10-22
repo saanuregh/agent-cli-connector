@@ -40,6 +40,8 @@ pub const Translator = struct {
     /// and its turn has not started yet.
     start_schema: bool = false,
     schema_turns: IdMap(void) = .empty,
+    /// Set from before turn/start is sent until its turn is accepted.
+    start_pending: bool = false,
     final_text: IdMap([]u8) = .empty,
     /// Started main-thread items, in start order.
     items: IdMap(*StoredItem) = .empty,
@@ -60,7 +62,6 @@ pub const Translator = struct {
     usage_total: decode.TokenUsage = .{},
     have_total: bool = false,
     turn_usage: decode.TokenUsage = .{},
-    context_limit: i64 = 0,
     context_tokens: i64 = 0,
     retries: IdMap(RetryState) = .empty,
     /// The merged native rate-limit snapshot (JSON) per limit ID.
@@ -133,16 +134,20 @@ pub fn beginStart(codex: *CodexSession, has_schema: bool) void {
     lock(codex);
     defer unlock(codex);
     codex.translator.start_schema = has_schema;
+    codex.translator.start_pending = true;
 }
 
 /// Ends the turn/start of `turn` (empty when it failed). A schema not
 /// already given to the turn when it started is given to it now.
 pub fn endStart(codex: *CodexSession, turn: []const u8) void {
+    const translator = &codex.translator;
     lock(codex);
     defer unlock(codex);
-    if (codex.translator.start_schema and turn.len > 0) codex.translator.schema_turns.put(codex.env.gpa, .of(turn), {}) catch
+    if (translator.start_schema and turn.len > 0) translator.schema_turns.put(codex.env.gpa, .of(turn), {}) catch
         outOfMemory("recording a turn's output schema");
-    codex.translator.start_schema = false;
+    translator.start_schema = false;
+    // A started turn stays pending until the runtime knows its ID.
+    if (turn.len == 0) translator.start_pending = false;
 }
 
 pub const ChildTurn = struct { thread: []const u8, turn: []const u8 };
@@ -438,6 +443,10 @@ fn turnStarted(codex: *CodexSession, id: []const u8, raw: RawJson) void {
         translator.schema_turns.put(gpa, .of(id), {}) catch outOfMemory("recording a turn's output schema");
         translator.start_schema = false;
     }
+    // Neither a start in flight nor one Codex accepted: Codex started the
+    // turn itself, such as for a compaction.
+    const own = id.len > 0 and !translator.start_pending and !codex.rt().knowsTurn(id);
+    const origin: []const u8 = if (!own) "" else if (codex.compacting) "compaction" else "codex";
     if (id.len > 0 and !containsId(translator.turn_order.items, id)) {
         if (translator.turn_order.append(gpa, .of(id))) {
             if (translator.turn_order.items.len > max_turn_order) {
@@ -453,7 +462,7 @@ fn turnStarted(codex: *CodexSession, id: []const u8, raw: RawJson) void {
     // While a start is in flight, the start registers its turn.
     _, const starting = codex.rt().runStarted(id);
     if (!starting and id.len > 0) codex.rt().trackTurn(id);
-    emit(codex, id, raw, .{ .turn_started = .{} });
+    emit(codex, id, raw, .{ .turn_started = .{ .native_turn_id = id, .origin = origin } });
 }
 
 fn turnCompleted(codex: *CodexSession, a: Allocator, params: JsonView, raw: RawJson) !void {
@@ -548,7 +557,8 @@ fn tokenUsage(codex: *CodexSession, turn: []const u8, params: JsonView, raw: Raw
     const last = decode.TokenUsage.parse(token_usage.get("last"));
     const translator = &codex.translator;
     lock(codex);
-    if (token_usage.has("modelContextWindow")) translator.context_limit = token_usage.int("modelContextWindow");
+    const limit = token_usage.int("modelContextWindow");
+    if (limit > 0 and limit != codex.rt().contextWindow()) codex.updateInfo(.{ .context_window = limit });
     translator.context_tokens = last.input + last.output;
     const running, _ = codex.rt().runningTurn();
     const counted = turn.len == 0 or running.eql(turn);
@@ -566,7 +576,6 @@ fn tokenUsage(codex: *CodexSession, turn: []const u8, params: JsonView, raw: Raw
 
 fn turnUsageLocked(codex: *CodexSession) types.Usage {
     var usage = codex.translator.turn_usage.usage();
-    usage.context_window = codex.translator.context_limit;
     usage.context_tokens = codex.translator.context_tokens;
     return usage;
 }
@@ -720,10 +729,14 @@ fn noteItemLocked(codex: *CodexSession, turn: []const u8, id: []const u8) void {
 
 /// Forgets `turn` and later turns after a rewind, withdraws their pending
 /// async questions, and reports their items removed. An unknown turn came
-/// before every turn this session saw, so all of them go.
-pub fn rewound(codex: *CodexSession, a: Allocator, turn: []const u8) void {
+/// before every turn this session saw, so all of them go. Returns the
+/// removed item IDs, allocated from `out`.
+pub fn rewound(codex: *CodexSession, out: Allocator, turn: []const u8) Allocator.Error![]const []const u8 {
     const gpa = codex.env.gpa;
     const translator = &codex.translator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
     var removed: std.ArrayList([]const u8) = .empty;
     var ids: std.ArrayList([]const u8) = .empty;
     lock(codex);
@@ -737,7 +750,7 @@ pub fn rewound(codex: *CodexSession, a: Allocator, turn: []const u8) void {
         removed.append(a, a.dupe(u8, remembered.slice()) catch "") catch outOfMemory("reporting rewound turns");
         if (translator.turn_item_ids.fetchOrderedRemove(remembered.*)) |kv| {
             var list = kv.value;
-            for (list.items) |*item_id| ids.append(a, a.dupe(u8, item_id.slice()) catch "") catch outOfMemory("reporting rewound items");
+            for (list.items) |*item_id| ids.append(out, out.dupe(u8, item_id.slice()) catch "") catch outOfMemory("reporting rewound items");
             list.deinit(gpa);
         }
     }
@@ -756,7 +769,9 @@ pub fn rewound(codex: *CodexSession, a: Allocator, turn: []const u8) void {
     }
     unlock(codex);
     for (withdraw.items) |id| codex.rt().withdrawRequest(id);
-    if (ids.items.len > 0) emit(codex, "", null, .{ .items_removed = .{ .ids = ids.items } });
+    const owned = try ids.toOwnedSlice(out);
+    if (owned.len > 0) emit(codex, "", null, .{ .items_removed = .{ .ids = owned } });
+    return owned;
 }
 
 // ---------------------------------------------------------------- subagents
@@ -1113,8 +1128,8 @@ pub fn rateLimitSnapshotLocked(codex: *CodexSession, a: Allocator, id: []const u
 
 // ---------------------------------------------------------------- requests
 
-/// The app-server requests answered through the session. Others are
-/// refused with JSON-RPC error -32601.
+/// The app-server requests with a uniform meaning. Others become
+/// `native_request` events.
 const RequestMethod = enum {
     @"item/tool/call",
     @"item/commandExecution/requestApproval",
@@ -1157,8 +1172,6 @@ pub fn serverRequest(codex: *CodexSession, a: Allocator, id: []const u8, method:
 }
 
 fn serverRequestInner(codex: *CodexSession, a: Allocator, id: []const u8, method: []const u8, params: JsonView, line: []const u8) !void {
-    const known = std.meta.stringToEnum(RequestMethod, method) orelse
-        return codex.client.replyError(a, id, -32601, try std.fmt.allocPrint(a, "unsupported request: {s}", .{method}), null);
     const thread = decode.threadOf(params);
     const request: Request = .{
         .id = id,
@@ -1167,6 +1180,12 @@ fn serverRequestInner(codex: *CodexSession, a: Allocator, id: []const u8, method
         .native = try nativeRequest(a, id, method, params.v orelse .null),
         .raw = RawJson.of(line),
     };
+    const known = std.meta.stringToEnum(RequestMethod, method) orelse return codex.rt().request(.{ .native_request = .{
+        .id = request.key,
+        .method = method,
+        .params = try params.raw(a),
+        .subagent_id = request.subagent,
+    } }, request.raw, request.native);
     switch (known) {
         .@"item/tool/call" => try toolCall(codex, a, request, params),
         .@"item/commandExecution/requestApproval" => try commandApproval(codex, a, request, params),
@@ -1431,7 +1450,7 @@ pub fn respond(session: *Session, pending: *const Session.Pending, response: typ
     const params = native.get("params");
     const id = if (native.get("id").v) |value| try agent.json.encodeValue(a, value) else "null";
 
-    if (eql(method, "async")) return answerAsync(codex, a, pending, params, response.user_input, diag);
+    if (eql(method, "async") and response == .user_input) return answerAsync(codex, a, pending, params, response.user_input, diag);
 
     const result: Value = switch (response) {
         .permission => |answer| try permissionResult(a, method, params, answer, diag),
@@ -1449,6 +1468,15 @@ pub fn respond(session: *Session, pending: *const Session.Pending, response: typ
             try out.put("_meta", agent.json.valueOf(a, answer.mcp_meta) orelse .null);
             break :blk out.value();
         },
+        .native => |answer| {
+            if (answer.@"error") |failure| return codex.client.replyError(a, id, failure.code, failure.message, diag);
+            const value: Value = if (answer.result) |raw|
+                agent.json.valueOf(a, raw) orelse return errors.fail(diag, .invalid_answer, "codex: the native result is not JSON", .{})
+            else
+                .null;
+            return codex.client.reply(a, id, value, diag);
+        },
+        .dialog => return errors.fail(diag, .invalid_answer, "codex: no dialog requests", .{}),
     };
     return codex.client.reply(a, id, result, diag);
 }

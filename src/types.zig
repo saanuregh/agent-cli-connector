@@ -81,6 +81,9 @@ pub const Config = struct {
     env: ?StringMap = null,
     /// Removed from the inherited environment.
     unset_env: []const []const u8 = &.{},
+    /// Words placed before the harness executable, such as a sandbox
+    /// wrapper: the harness runs as `command_prefix ++ [executable] ++ args`.
+    command_prefix: []const []const u8 = &.{},
     /// Caps unread events; the oldest are dropped and `events_dropped`
     /// reports how many. Zero means no limit.
     event_buffer_limit: u32 = 0,
@@ -503,6 +506,25 @@ pub const Capabilities = struct {
     rate_limits: bool = false,
     hooks: bool = false,
     goals: bool = false,
+    /// Tool output streams as `tool_output_delta` events.
+    tool_output_stream: bool = false,
+    /// Plans stream as `plan_delta` events.
+    plan_stream: bool = false,
+    /// Rewinding continues under a new session ID (`session_id_changed`
+    /// with reason `rewind`).
+    rewind_changes_session_id: bool = false,
+    /// Subagents send requests of their own (`subagent_id` is set).
+    requests_from_subagents: bool = false,
+    /// The harness starts turns on its own, such as when a background task
+    /// finishes; their `turn_started` has an `origin`.
+    background_turns: bool = false,
+    /// Steered input stops running tool calls.
+    steer_interrupts_tools: bool = false,
+    /// The harness sends `dialog_request` events.
+    dialogs: bool = false,
+    /// The harness sends `native_request` events for requests without a
+    /// uniform meaning.
+    native_requests: bool = false,
     // Provider-level operations.
     check: bool = false,
     list_models: bool = false,
@@ -510,6 +532,8 @@ pub const Capabilities = struct {
     read_history: bool = false,
     delete_session: bool = false,
     list_subagents: bool = false,
+    /// `Provider.call` reaches the harness without a session.
+    provider_call: bool = false,
 };
 
 pub const SessionInfo = struct {
@@ -524,7 +548,39 @@ pub const SessionInfo = struct {
     tools: []const []const u8 = &.{},
     commands: []const SlashCommand = &.{},
     mcp_servers: []const McpServerStatus = &.{},
+    /// The model's context window in tokens; zero when unknown.
+    context_window: i64 = 0,
     raw: ?RawJson = null,
+};
+
+/// The result of `Session.rewind`.
+pub const RewindResult = struct {
+    /// The session ID after the rewind.
+    session_id: []const u8 = "",
+    /// The rewind continued in a new session; the old one is unchanged.
+    forked: bool = false,
+    /// Transcript items the rewind dropped.
+    removed_item_ids: []const []const u8 = &.{},
+};
+
+/// A snapshot of a live session, for a client that (re)connects.
+pub const SessionState = struct {
+    status: SessionStatus = .idle,
+    /// The turn the harness works on; empty when none.
+    running_turn_id: []const u8 = "",
+    /// Input waiting to run, oldest first.
+    queued_turn_ids: []const []const u8 = &.{},
+    /// Tasks not yet finished.
+    tasks: []const Task = &.{},
+    /// The request events still waiting for an answer, in arrival order.
+    pending_requests: []const Event = &.{},
+    /// The latest `usage_updated` usage: the running or last turn's usage so
+    /// far, with the context use.
+    usage: Usage = .{},
+    info: SessionInfo = .{},
+    /// A task is unfinished, or the running turn was started by the harness
+    /// (its `turn_started` has an `origin`).
+    background_work: bool = false,
 };
 
 pub const SlashCommand = struct {
@@ -719,13 +775,49 @@ pub const ElicitationResponse = struct {
     mcp_meta: ?RawJson = null,
 };
 
+/// A harness dialog the host shows, such as Claude's `request_user_dialog`.
+/// The harness sends only the dialog kinds the host declared.
+pub const DialogRequest = struct {
+    id: []const u8 = "",
+    /// The dialog kind, such as "resume_return".
+    kind: []const u8 = "",
+    /// The dialog's native fields.
+    data: ?RawJson = null,
+    tool_use_id: []const u8 = "",
+    subagent_id: []const u8 = "",
+};
+
+pub const DialogResponse = struct {
+    behavior: enum { completed, cancelled } = .cancelled,
+    /// The dialog's native answer, with `completed`.
+    result: ?RawJson = null,
+};
+
+/// A harness request without a uniform meaning, such as a Codex app-server
+/// request this library does not know. Answer it with its native result or
+/// an error.
+pub const NativeRequest = struct {
+    id: []const u8 = "",
+    method: []const u8 = "",
+    params: ?RawJson = null,
+    subagent_id: []const u8 = "",
+};
+
+pub const NativeResponse = struct {
+    result: ?RawJson = null,
+    /// Sent instead of `result` when set.
+    @"error": ?struct { code: i64 = -32603, message: []const u8 = "" } = null,
+};
+
 pub const Response = union(enum) {
     permission: PermissionResponse,
     user_input: UserInputResponse,
     elicitation: ElicitationResponse,
+    dialog: DialogResponse,
+    native: NativeResponse,
 };
 
-pub const RequestKind = enum { permission, user_input, elicitation };
+pub const RequestKind = enum { permission, user_input, elicitation, dialog, native };
 
 // ---------------------------------------------------------------- events
 
@@ -733,6 +825,8 @@ pub const SessionStatus = enum { idle, running, compacting, waiting };
 pub const NoticeLevel = enum { info, warning, @"error" };
 pub const HookOutcome = enum { none, succeeded, failed, blocked };
 pub const RequestOutcome = enum { pending, answered, withdrawn };
+/// Why the native session ID changed.
+pub const SessionIdChangedReason = enum { reset, rewind, @"resume" };
 
 /// One event of a session. `payload` decides the `"type"` on the wire.
 pub const Event = struct {
@@ -749,7 +843,15 @@ pub const Event = struct {
         session_started: struct { info: SessionInfo, resumed: bool = false },
         session_updated: struct { info: SessionInfo },
         status_changed: struct { status: SessionStatus },
-        turn_started: struct {},
+        turn_started: struct {
+            /// The harness's own ID for the turn, when it differs.
+            native_turn_id: []const u8 = "",
+            /// Who started the turn when not the host, such as
+            /// "task_notification".
+            origin: []const u8 = "",
+            /// The `Input.client_id` the turn runs.
+            client_id: []const u8 = "",
+        },
         turn_completed: struct { result: TurnResult },
         item_started: struct { item: Item },
         item_updated: struct { item: Item },
@@ -797,6 +899,8 @@ pub const Event = struct {
         permission_request: PermissionRequest,
         user_input_request: UserInputRequest,
         elicitation_request: ElicitationRequest,
+        dialog_request: DialogRequest,
+        native_request: NativeRequest,
         request_resolved: struct {
             request_id: []const u8,
             kind: RequestKind,
@@ -814,6 +918,13 @@ pub const Event = struct {
         },
         goal_updated: struct { goal: ?Goal = null },
         conversation_reset: struct { trigger: []const u8 = "", new_session_id: []const u8 = "" },
+        /// The session continues under a new native ID (the value for
+        /// `Config.resume_id`).
+        session_id_changed: struct {
+            previous_id: []const u8 = "",
+            id: []const u8 = "",
+            reason: SessionIdChangedReason = .reset,
+        },
         items_removed: struct { ids: []const []const u8 = &.{} },
         events_dropped: struct { count: u64 = 0 },
         /// A native message or harness feature without a uniform meaning,

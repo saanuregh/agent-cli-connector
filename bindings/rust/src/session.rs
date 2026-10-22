@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -52,7 +53,9 @@ impl SessionOptions {
     }
 
     /// Answers every permission request with `handler`, as its own tokio
-    /// task. The request still appears in the event stream.
+    /// task. The request still appears in the event streams, marked
+    /// [`handled`](SessionEvent::handled). If `handler` panics, the request
+    /// is denied with the panic message.
     pub fn on_permission<F, Fut>(mut self, handler: F) -> Self
     where
         F: Fn(PermissionRequest) -> Fut + Send + Sync + 'static,
@@ -62,7 +65,8 @@ impl SessionOptions {
         self
     }
 
-    /// Answers every user input request with `handler`, as its own tokio task.
+    /// Answers every user input request with `handler`, as its own tokio
+    /// task; a panic cancels the request.
     pub fn on_user_input<F, Fut>(mut self, handler: F) -> Self
     where
         F: Fn(UserInputRequest) -> Fut + Send + Sync + 'static,
@@ -72,13 +76,36 @@ impl SessionOptions {
         self
     }
 
-    /// Answers every MCP elicitation with `handler`, as its own tokio task.
+    /// Answers every MCP elicitation with `handler`, as its own tokio task;
+    /// a panic cancels the elicitation.
     pub fn on_elicitation<F, Fut>(mut self, handler: F) -> Self
     where
         F: Fn(ElicitationRequest) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ElicitationResponse> + Send + 'static,
     {
         self.hooks.on_elicitation = Some(boxed_handler(handler));
+        self
+    }
+
+    /// Answers every dialog request with `handler`, as its own tokio task;
+    /// a panic cancels the dialog.
+    pub fn on_dialog<F, Fut>(mut self, handler: F) -> Self
+    where
+        F: Fn(DialogRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = DialogResponse> + Send + 'static,
+    {
+        self.hooks.on_dialog = Some(boxed_handler(handler));
+        self
+    }
+
+    /// Answers every native request with `handler`, as its own tokio task;
+    /// a panic answers with error code -32603 and the panic message.
+    pub fn on_native_request<F, Fut>(mut self, handler: F) -> Self
+    where
+        F: Fn(NativeRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = NativeResponse> + Send + 'static,
+    {
+        self.hooks.on_native_request = Some(boxed_handler(handler));
         self
     }
 
@@ -105,13 +132,45 @@ pub(crate) struct Hooks {
     on_permission: Option<Handler<PermissionRequest, PermissionResponse>>,
     on_user_input: Option<Handler<UserInputRequest, UserInputResponse>>,
     on_elicitation: Option<Handler<ElicitationRequest, ElicitationResponse>>,
+    on_dialog: Option<Handler<DialogRequest, DialogResponse>>,
+    on_native_request: Option<Handler<NativeRequest, NativeResponse>>,
+}
+
+/// An event as kept for the streams: shared, with whether a handler answers it.
+#[derive(Clone)]
+struct Delivered {
+    event: Arc<Event>,
+    handled: bool,
+}
+
+/// The session stream's queue, made by the first [`Session::events`] call.
+#[derive(Default)]
+struct EventQueue {
+    tx: Option<UnboundedSender<Delivered>>,
+    /// Held by the one [`Events`] reading the session.
+    rx: Option<Arc<AsyncMutex<UnboundedReceiver<Delivered>>>>,
+    /// The `session_started` event, kept until the stream is made so that
+    /// the stream starts with it.
+    started: Option<Delivered>,
+}
+
+type Listener = Arc<dyn Fn(&SessionEvent) + Send + Sync>;
+
+#[derive(Clone)]
+struct Subscriber {
+    id: u64,
+    listener: Listener,
 }
 
 /// The reader's view of a session: its event queue, turn logs, and hooks.
 pub(crate) struct SessionState {
-    events_tx: Mutex<Option<UnboundedSender<Arc<Event>>>>,
-    /// Held by the one [`Events`] reading the session.
-    events_rx: Arc<AsyncMutex<UnboundedReceiver<Arc<Event>>>>,
+    events: Mutex<EventQueue>,
+    /// Replaced whole on subscribe and unsubscribe, so delivery clones one
+    /// `Arc` and runs the listeners without holding the lock.
+    subscribers: Mutex<Arc<[Subscriber]>>,
+    /// The session the events belong to, set by the first subscribe.
+    session: OnceLock<Weak<SessionInner>>,
+    next_subscriber: AtomicU64,
     closed: AtomicBool,
     close_error: Mutex<Option<ErrorInfo>>,
     hooks: Hooks,
@@ -124,10 +183,11 @@ pub(crate) struct SessionState {
 
 impl SessionState {
     pub(crate) fn new(hooks: Hooks) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
         Self {
-            events_tx: Mutex::new(Some(tx)),
-            events_rx: Arc::new(AsyncMutex::new(rx)),
+            events: Mutex::default(),
+            subscribers: Mutex::new(Arc::from([])),
+            session: OnceLock::new(),
+            next_subscriber: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             close_error: Mutex::new(None),
             hooks,
@@ -136,26 +196,79 @@ impl SessionState {
         }
     }
 
-    /// Queues an event for the session stream and its turn's log, and starts
-    /// the matching request handler, if any. Runs on the reader, so it never
-    /// blocks.
+    /// Starts the matching request handler, if any, passes an event to the
+    /// subscribers, and queues it for its turn's log and the session stream.
+    /// Runs on the reader, so it never blocks, unless a subscriber does.
     pub(crate) fn deliver(&self, shared: &Arc<Shared>, handle: &str, event: Event) {
         let event = Arc::new(event);
-        start_handler(&self.hooks, shared, handle, &event);
-        if !event.turn_id.is_empty() {
-            self.log_turn_event(&event);
+        let handled = start_handler(&self.hooks, shared, handle, &event);
+        let delivered = Delivered { event, handled };
+        self.notify_subscribers(&delivered);
+        if !delivered.event.turn_id.is_empty() {
+            self.log_turn_event(&delivered);
         }
-        if let Some(tx) = &*self.events_tx.lock().unwrap() {
-            let _ = tx.send(event);
+        let mut queue = self.events.lock().unwrap();
+        if let Some(tx) = &queue.tx {
+            let _ = tx.send(delivered);
+        } else if queue.rx.is_none()
+            && matches!(delivered.event.payload, EventPayload::SessionStarted(_))
+        {
+            queue.started = Some(delivered);
         }
     }
 
-    fn log_turn_event(&self, event: &Arc<Event>) {
+    fn notify_subscribers(&self, delivered: &Delivered) {
+        let subscribers = self.subscribers.lock().unwrap().clone();
+        let Some(session) = self.session.get() else {
+            return;
+        };
+        for subscriber in subscribers.iter() {
+            let event = SessionEvent::new(delivered.clone(), session);
+            // A panicking listener does not stop delivery to the others.
+            let _ = std::panic::catch_unwind(AssertUnwindSafe(|| (subscriber.listener)(&event)));
+        }
+    }
+
+    fn subscribe(&self, listener: Listener, session: Weak<SessionInner>) -> u64 {
+        let id = self.next_subscriber.fetch_add(1, Ordering::Relaxed);
+        self.session.get_or_init(|| session);
+        let mut subscribers = self.subscribers.lock().unwrap();
+        *subscribers = subscribers
+            .iter()
+            .cloned()
+            .chain([Subscriber { id, listener }])
+            .collect();
+        id
+    }
+
+    /// The session stream's receiver, made on the first call. It starts with
+    /// the `session_started` event; other events delivered before it are not
+    /// queued.
+    fn event_reader(&self) -> Arc<AsyncMutex<UnboundedReceiver<Delivered>>> {
+        let mut queue = self.events.lock().unwrap();
+        if let Some(rx) = &queue.rx {
+            return rx.clone();
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        if let Some(started) = queue.started.take() {
+            let _ = tx.send(started);
+        }
+        // `mark_closed` sets `closed` before it drops the sender under this lock.
+        if !self.closed.load(Ordering::Acquire) {
+            queue.tx = Some(tx);
+        }
+        let rx = Arc::new(AsyncMutex::new(rx));
+        queue.rx = Some(rx.clone());
+        rx
+    }
+
+    fn log_turn_event(&self, delivered: &Delivered) {
+        let event = &delivered.event;
         let mut turns = self.turns.lock().unwrap();
         let Some(log) = turns.get(&event.turn_id) else {
             return;
         };
-        log.add(event.clone());
+        log.add(delivered.clone());
         let ends_turn = matches!(&event.payload, EventPayload::TurnCompleted(c)
             if c.result.turn_id.is_empty() || c.result.turn_id == event.turn_id);
         if ends_turn {
@@ -184,7 +297,7 @@ impl SessionState {
     pub(crate) fn mark_closed(&self, error: Option<ErrorInfo>) {
         *self.close_error.lock().unwrap() = error;
         self.closed.store(true, Ordering::Release);
-        self.events_tx.lock().unwrap().take();
+        self.events.lock().unwrap().tx.take();
         for log in self.turns.lock().unwrap().values() {
             log.end();
         }
@@ -246,21 +359,63 @@ impl<F: FnOnce()> Drop for Undo<F> {
     }
 }
 
-/// Starts the handler for a request event as a task, if the hooks have one.
-fn start_handler(hooks: &Hooks, shared: &Arc<Shared>, handle: &str, event: &Event) {
+/// Starts the handler for a request event as a task, if the hooks have one,
+/// and reports whether it did.
+fn start_handler(hooks: &Hooks, shared: &Arc<Shared>, handle: &str, event: &Event) -> bool {
     let answer = match &event.payload {
-        EventPayload::PermissionRequest(r) => auto_answer(&hooks.on_permission, r, &r.id, handle),
-        EventPayload::UserInputRequest(r) => auto_answer(&hooks.on_user_input, r, &r.id, handle),
-        EventPayload::ElicitationRequest(r) => auto_answer(&hooks.on_elicitation, r, &r.id, handle),
+        EventPayload::PermissionRequest(r) => {
+            auto_answer(&hooks.on_permission, r, &r.id, handle, |message| {
+                PermissionResponse {
+                    decision: PermissionDecision::Deny,
+                    message,
+                    ..Default::default()
+                }
+            })
+        }
+        EventPayload::UserInputRequest(r) => {
+            auto_answer(&hooks.on_user_input, r, &r.id, handle, |_| {
+                UserInputResponse {
+                    cancelled: true,
+                    ..Default::default()
+                }
+            })
+        }
+        EventPayload::ElicitationRequest(r) => {
+            auto_answer(&hooks.on_elicitation, r, &r.id, handle, |_| {
+                ElicitationResponse {
+                    action: ElicitationResponseAction::Cancel,
+                    ..Default::default()
+                }
+            })
+        }
+        EventPayload::DialogRequest(r) => {
+            auto_answer(&hooks.on_dialog, r, &r.id, handle, |_| DialogResponse {
+                behavior: DialogResponseBehavior::Cancelled,
+                result: None,
+            })
+        }
+        EventPayload::NativeRequest(r) => {
+            auto_answer(&hooks.on_native_request, r, &r.id, handle, |message| {
+                NativeResponse {
+                    result: None,
+                    error: Some(NativeResponseError {
+                        code: -32603,
+                        message,
+                    }),
+                }
+            })
+        }
         _ => None,
     };
-    if let Some(answer) = answer {
-        let task_shared = shared.clone();
-        shared.runtime.spawn(async move {
-            let params = answer.await;
-            let _: Result<()> = task_shared.request(method::REQUEST_RESPOND, params).await;
-        });
-    }
+    let Some(answer) = answer else {
+        return false;
+    };
+    let task_shared = shared.clone();
+    shared.runtime.spawn(async move {
+        let params = answer.await;
+        let _: Result<()> = task_shared.request(method::REQUEST_RESPOND, params).await;
+    });
+    true
 }
 
 /// The events of one turn, kept for every [`TurnEvents`] that reads it.
@@ -271,14 +426,14 @@ pub(crate) struct TurnLog {
 
 #[derive(Default)]
 struct TurnLogState {
-    events: Vec<Arc<Event>>,
+    events: Vec<Delivered>,
     ended: bool,
     /// The readers waiting for the next event.
     wakers: Vec<Waker>,
 }
 
 impl TurnLog {
-    fn add(&self, event: Arc<Event>) {
+    fn add(&self, event: Delivered) {
         let mut state = self.state.lock().unwrap();
         if state.ended {
             return;
@@ -301,10 +456,10 @@ impl TurnLog {
         self.state.lock().unwrap().ended
     }
 
-    fn poll_event(&self, index: usize, cx: &mut Context<'_>) -> Poll<Option<Event>> {
+    fn poll_event(&self, index: usize, cx: &mut Context<'_>) -> Poll<Option<Delivered>> {
         let mut state = self.state.lock().unwrap();
         if let Some(event) = state.events.get(index) {
-            return Poll::Ready(Some(Event::clone(event)));
+            return Poll::Ready(Some(event.clone()));
         }
         if state.ended {
             return Poll::Ready(None);
@@ -323,24 +478,40 @@ fn wake_readers(mut state: MutexGuard<'_, TurnLogState>) {
     wakers.into_iter().for_each(Waker::wake);
 }
 
-/// The answer `handler` gives `request`, computed later as a task.
+/// The answer `handler` gives `request`, computed later as a task. If the
+/// handler panics, the answer is `on_panic` of the panic message.
 fn auto_answer<Req, Resp>(
     handler: &Option<Handler<Req, Resp>>,
     request: &Req,
     request_id: &str,
     handle: &str,
+    on_panic: fn(String) -> Resp,
 ) -> Option<BoxFuture<RespondParams>>
 where
     Req: Clone + Send + 'static,
-    Resp: RequestResponse + 'static,
+    Resp: RequestResponse + Send + 'static,
 {
     let handler = handler.clone()?;
     let (request, request_id, handle) = (request.clone(), request_id.to_owned(), handle.to_owned());
-    // The handler is called inside the task, so its synchronous part never
-    // runs on the reader.
+    // The handler is called inside its own task, so its synchronous part
+    // never runs on the reader and a panic is caught by the join.
     Some(Box::pin(async move {
-        respond_params(handle, request_id, handler(request).await)
+        let response = match tokio::spawn(async move { handler(request).await }).await {
+            Ok(response) => response,
+            Err(e) if e.is_panic() => on_panic(panic_message(e.into_panic())),
+            Err(e) => on_panic(e.to_string()),
+        };
+        respond_params(handle, request_id, response)
     }))
+}
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => payload
+            .downcast_ref::<&str>()
+            .map_or_else(|| "the handler panicked".into(), |m| (*m).into()),
+    }
 }
 
 fn respond_params(
@@ -357,7 +528,8 @@ fn respond_params(
     params
 }
 
-/// An answer to a permission, user input, or elicitation request.
+/// An answer to a permission, user input, elicitation, dialog, or native
+/// request.
 pub trait RequestResponse {
     fn set(self, params: &mut RespondParams);
 }
@@ -377,6 +549,18 @@ impl RequestResponse for UserInputResponse {
 impl RequestResponse for ElicitationResponse {
     fn set(self, params: &mut RespondParams) {
         params.elicitation = Some(self);
+    }
+}
+
+impl RequestResponse for DialogResponse {
+    fn set(self, params: &mut RespondParams) {
+        params.dialog = Some(self);
+    }
+}
+
+impl RequestResponse for NativeResponse {
+    fn set(self, params: &mut RespondParams) {
+        params.native = Some(self);
     }
 }
 
@@ -545,12 +729,32 @@ impl Session {
         .await
     }
 
-    /// The session's events in arrival order. They are buffered without a
-    /// limit until read; the stream ends when the session closes. One reader
-    /// at a time: a second call waits until the first [`Events`] is dropped.
+    /// The session's events in arrival order. Buffering starts at the first
+    /// call: the stream begins with the `session_started` event, and other
+    /// earlier events are not kept for it. They are buffered
+    /// without a limit until read; the stream ends when the session closes.
+    /// One reader at a time: a second call waits until the first [`Events`]
+    /// is dropped.
     pub async fn events(&self) -> Events {
         Events {
-            rx: self.inner.state.events_rx.clone().lock_owned().await,
+            rx: self.inner.state.event_reader().lock_owned().await,
+            session: Arc::downgrade(&self.inner),
+        }
+    }
+
+    /// Calls `listener` with every later event of the session, in order, on
+    /// the connection's reader, before the event reaches any stream. It
+    /// must not block; a panic is caught and does not stop delivery. The
+    /// listener is removed when the [`Subscription`] is dropped.
+    pub fn subscribe(
+        &self,
+        listener: impl Fn(&SessionEvent) + Send + Sync + 'static,
+    ) -> Subscription {
+        let state = &self.inner.state;
+        let id = state.subscribe(Arc::new(listener), Arc::downgrade(&self.inner));
+        Subscription {
+            state: Arc::downgrade(state),
+            id,
         }
     }
 
@@ -632,6 +836,7 @@ impl Turn {
         TurnEvents {
             log: self.log.clone(),
             next: 0,
+            session: Arc::downgrade(&self.session.inner),
         }
     }
 }
@@ -639,34 +844,33 @@ impl Turn {
 /// A session's event stream; see [`Session::events`]. Read it with
 /// [`next`](Self::next) or as a [`Stream`].
 pub struct Events {
-    rx: OwnedMutexGuard<UnboundedReceiver<Arc<Event>>>,
-}
-
-/// The event itself, copied only when a turn log still holds it.
-fn into_owned(event: Arc<Event>) -> Event {
-    Arc::try_unwrap(event).unwrap_or_else(|shared| Event::clone(&shared))
+    rx: OwnedMutexGuard<UnboundedReceiver<Delivered>>,
+    session: Weak<SessionInner>,
 }
 
 impl Events {
     /// The next event; `None` once the session closed and every event was read.
-    pub async fn next(&mut self) -> Option<Event> {
-        self.rx.recv().await.map(into_owned)
+    pub async fn next(&mut self) -> Option<SessionEvent> {
+        let delivered = self.rx.recv().await?;
+        Some(SessionEvent::new(delivered, &self.session))
     }
 
     /// The next event if one is queued.
-    pub fn try_next(&mut self) -> Option<Event> {
-        self.rx.try_recv().ok().map(into_owned)
+    pub fn try_next(&mut self) -> Option<SessionEvent> {
+        let delivered = self.rx.try_recv().ok()?;
+        Some(SessionEvent::new(delivered, &self.session))
     }
 }
 
 impl Stream for Events {
-    type Item = Event;
+    type Item = SessionEvent;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Event>> {
-        self.get_mut()
-            .rx
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<SessionEvent>> {
+        let this = self.get_mut();
+        let session = &this.session;
+        this.rx
             .poll_recv(cx)
-            .map(|event| event.map(into_owned))
+            .map(|d| d.map(|d| SessionEvent::new(d, session)))
     }
 }
 
@@ -675,79 +879,246 @@ impl Stream for Events {
 pub struct TurnEvents {
     log: Arc<TurnLog>,
     next: usize,
+    session: Weak<SessionInner>,
 }
 
 impl TurnEvents {
     /// The turn's next event; `None` after its `turn_completed`, or once the
     /// session closed.
-    pub async fn next(&mut self) -> Option<Event> {
+    pub async fn next(&mut self) -> Option<SessionEvent> {
         std::future::poll_fn(|cx| self.poll_event(cx)).await
     }
 
-    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<Event>> {
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<SessionEvent>> {
         let event = std::task::ready!(self.log.poll_event(self.next, cx));
         if event.is_some() {
             self.next += 1;
         }
-        Poll::Ready(event)
+        Poll::Ready(event.map(|d| SessionEvent::new(d, &self.session)))
     }
 }
 
 impl Stream for TurnEvents {
-    type Item = Event;
+    type Item = SessionEvent;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Event>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<SessionEvent>> {
         self.get_mut().poll_event(cx)
     }
 }
 
-// ---------------------------------------------------------------- answering request events
+/// Keeps a [`Session::subscribe`] listener registered; dropping it, or
+/// [`unsubscribe`](Self::unsubscribe), removes the listener.
+#[must_use = "dropping the subscription removes the listener"]
+pub struct Subscription {
+    state: Weak<SessionState>,
+    id: u64,
+}
 
-impl PermissionRequest {
-    /// Answers this request in `session`, the session whose stream it came from.
-    pub async fn respond(&self, session: &Session, response: PermissionResponse) -> Result<()> {
-        session.respond(&self.id, response).await
-    }
+impl Subscription {
+    /// Removes the listener; it sees no later event.
+    pub fn unsubscribe(self) {}
+}
 
-    /// Allows the call once.
-    pub async fn allow(&self, session: &Session) -> Result<()> {
-        session.allow(&self.id).await
-    }
-
-    /// Denies the call, telling the model why.
-    pub async fn deny(&self, session: &Session, message: &str) -> Result<()> {
-        session.deny(&self.id, message).await
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.upgrade() {
+            let mut subscribers = state.subscribers.lock().unwrap();
+            *subscribers = subscribers
+                .iter()
+                .filter(|s| s.id != self.id)
+                .cloned()
+                .collect();
+        }
     }
 }
 
-impl UserInputRequest {
-    /// Answers this request in `session`, the session whose stream it came from.
-    pub async fn respond(&self, session: &Session, response: UserInputResponse) -> Result<()> {
-        session.respond(&self.id, response).await
-    }
+// ---------------------------------------------------------------- session events
 
-    /// Answers by question ID: the selected labels or text.
-    pub async fn answer(
-        &self,
-        session: &Session,
-        answers: HashMap<String, Vec<String>>,
-    ) -> Result<()> {
-        session.answer(&self.id, answers).await
+/// An event as a stream or subscriber gets it: the [`Event`] (through
+/// `Deref`), whether a handler answers it, and a weak link to its session,
+/// so a request event is answered with its own helpers such as
+/// [`allow`](Self::allow) or [`complete`](Self::complete). The link does
+/// not keep the session open.
+#[derive(Clone)]
+pub struct SessionEvent {
+    event: Arc<Event>,
+    handled: bool,
+    session: Weak<SessionInner>,
+}
+
+impl std::fmt::Debug for SessionEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionEvent")
+            .field("event", &self.event)
+            .field("handled", &self.handled)
+            .finish_non_exhaustive()
     }
 }
 
-impl ElicitationRequest {
-    /// Answers this request in `session`, the session whose stream it came from.
-    pub async fn respond(&self, session: &Session, response: ElicitationResponse) -> Result<()> {
-        session.respond(&self.id, response).await
+impl std::ops::Deref for SessionEvent {
+    type Target = Event;
+
+    fn deref(&self) -> &Event {
+        &self.event
+    }
+}
+
+impl From<SessionEvent> for Event {
+    fn from(event: SessionEvent) -> Event {
+        event.into_event()
+    }
+}
+
+impl SessionEvent {
+    fn new(delivered: Delivered, session: &Weak<SessionInner>) -> Self {
+        Self {
+            event: delivered.event,
+            handled: delivered.handled,
+            session: session.clone(),
+        }
     }
 
-    /// Accepts with the form content.
-    pub async fn accept(&self, session: &Session, content: Value) -> Result<()> {
-        session.accept(&self.id, content).await
+    pub fn event(&self) -> &Event {
+        &self.event
     }
 
-    pub async fn decline(&self, session: &Session) -> Result<()> {
-        session.decline(&self.id).await
+    /// The event itself, copied only when another stream still holds it.
+    pub fn into_event(self) -> Event {
+        Arc::try_unwrap(self.event).unwrap_or_else(|shared| Event::clone(&shared))
+    }
+
+    /// True for a request event that a [`SessionOptions`] handler answers;
+    /// it is shown for information and needs no answer.
+    pub fn handled(&self) -> bool {
+        self.handled
+    }
+
+    /// The session the event came from, if it is still open in this process.
+    pub fn session(&self) -> Option<Session> {
+        self.session.upgrade().map(|inner| Session { inner })
+    }
+
+    /// The kind name and ID of a request event.
+    fn request(&self) -> Option<(&'static str, &str)> {
+        match &self.event.payload {
+            EventPayload::PermissionRequest(r) => Some(("permission_request", &r.id)),
+            EventPayload::UserInputRequest(r) => Some(("user_input_request", &r.id)),
+            EventPayload::ElicitationRequest(r) => Some(("elicitation_request", &r.id)),
+            EventPayload::DialogRequest(r) => Some(("dialog_request", &r.id)),
+            EventPayload::NativeRequest(r) => Some(("native_request", &r.id)),
+            _ => None,
+        }
+    }
+
+    /// The request ID of a request event.
+    pub fn request_id(&self) -> Option<&str> {
+        self.request().map(|(_, id)| id)
+    }
+
+    /// Answers this request event in its session. Fails with
+    /// [`ErrorKind::InvalidParams`] for an event that is not a request and
+    /// [`ErrorKind::Closed`] once the session was dropped.
+    pub async fn respond(&self, response: impl RequestResponse) -> Result<()> {
+        let id = self
+            .request_id()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidParams, "not a request event"))?;
+        let session = self
+            .session()
+            .ok_or_else(|| Error::closed("the session was dropped"))?;
+        session.respond(id, response).await
+    }
+
+    /// The request ID and session, for a request event of `kind`.
+    fn target(&self, kind: &'static str) -> Result<(&str, Session)> {
+        let id = match self.request() {
+            Some((actual, id)) if actual == kind => id,
+            _ => {
+                let message = format!("not a {kind} event");
+                return Err(Error::new(ErrorKind::InvalidParams, message));
+            }
+        };
+        let session = self
+            .session()
+            .ok_or_else(|| Error::closed("the session was dropped"))?;
+        Ok((id, session))
+    }
+
+    async fn respond_to(&self, kind: &'static str, response: impl RequestResponse) -> Result<()> {
+        let (id, session) = self.target(kind)?;
+        session.respond(id, response).await
+    }
+
+    /// Allows a permission request's call once.
+    pub async fn allow(&self) -> Result<()> {
+        let (id, session) = self.target("permission_request")?;
+        session.allow(id).await
+    }
+
+    /// Denies a permission request's call, telling the model why.
+    pub async fn deny(&self, message: &str) -> Result<()> {
+        let (id, session) = self.target("permission_request")?;
+        session.deny(id, message).await
+    }
+
+    /// Answers a user input request by question ID: the selected labels or
+    /// text.
+    pub async fn answer(&self, answers: HashMap<String, Vec<String>>) -> Result<()> {
+        let (id, session) = self.target("user_input_request")?;
+        session.answer(id, answers).await
+    }
+
+    /// Accepts an elicitation with the form content.
+    pub async fn accept(&self, content: Value) -> Result<()> {
+        let response = ElicitationResponse {
+            action: ElicitationResponseAction::Accept,
+            content: Some(content),
+            ..Default::default()
+        };
+        self.respond_to("elicitation_request", response).await
+    }
+
+    /// Declines an elicitation.
+    pub async fn decline(&self) -> Result<()> {
+        let (id, session) = self.target("elicitation_request")?;
+        session.decline(id).await
+    }
+
+    /// Completes a dialog request with an optional result.
+    pub async fn complete(&self, result: Option<Value>) -> Result<()> {
+        let response = DialogResponse {
+            behavior: DialogResponseBehavior::Completed,
+            result,
+        };
+        self.respond_to("dialog_request", response).await
+    }
+
+    /// Cancels a dialog request.
+    pub async fn cancel(&self) -> Result<()> {
+        let response = DialogResponse {
+            behavior: DialogResponseBehavior::Cancelled,
+            result: None,
+        };
+        self.respond_to("dialog_request", response).await
+    }
+
+    /// Answers a native request with an optional result.
+    pub async fn reply(&self, result: Option<Value>) -> Result<()> {
+        let response = NativeResponse {
+            result,
+            error: None,
+        };
+        self.respond_to("native_request", response).await
+    }
+
+    /// Answers a native request with a JSON-RPC error.
+    pub async fn fail(&self, code: i64, message: &str) -> Result<()> {
+        let response = NativeResponse {
+            result: None,
+            error: Some(NativeResponseError {
+                code,
+                message: message.into(),
+            }),
+        };
+        self.respond_to("native_request", response).await
     }
 }

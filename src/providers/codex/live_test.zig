@@ -151,7 +151,7 @@ test "live codex" {
         }
     }
     std.debug.print("rewind {s}:\n", .{last_turn});
-    session.rewind(last_turn, &diag) catch |err| std.debug.print("  rewind failed: {t} {s}\n", .{ err, agent.Diagnostics.of(&diag, err).message });
+    _ = session.rewind(last_turn, a, &diag) catch |err| std.debug.print("  rewind failed: {t} {s}\n", .{ err, agent.Diagnostics.of(&diag, err).message });
     while (session.nextEvent(.{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } })) |owned| {
         defer owned.destroy();
         switch (owned.event.payload) {

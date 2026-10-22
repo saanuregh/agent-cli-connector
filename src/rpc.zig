@@ -5,9 +5,10 @@
 //! answers the library's requests (`tool/call`). The library sends
 //! `session/event` and `session/closed` notifications. Requests run as
 //! concurrent tasks; requests for one session that change it run in the order
-//! they arrived, while `session/wait`, `session/info`,
-//! `session/pendingRequests`, `session/interrupt`, `session/interruptTurn`,
-//! `session/close`, and `request/respond` run at once.
+//! they arrived, while `session/wait`, `session/info`, `session/state`,
+//! `session/pendingRequests`, `session/call`, `session/interrupt`,
+//! `session/interruptTurn`, `session/close`, and `request/respond` run at
+//! once.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -22,7 +23,7 @@ const Diagnostics = errors.Diagnostics;
 const log = std.log.scoped(.agent);
 
 pub const protocol_version = 1;
-pub const library_version = "0.2.0";
+pub const library_version = "0.3.0";
 
 // ---------------------------------------------------------------- protocol
 
@@ -49,6 +50,7 @@ pub const ListSessionsParams = struct { provider: []const u8, options: types.Lis
 pub const ReadHistoryParams = struct { provider: []const u8, session_id: []const u8, options: types.ReadHistoryOptions = .{} };
 pub const DeleteSessionParams = struct { provider: []const u8, session_id: []const u8, cwd: []const u8 = "" };
 pub const ListSubagentsParams = struct { provider: []const u8, session_id: []const u8, cwd: []const u8 = "" };
+pub const ProviderCallParams = struct { provider: []const u8, method: []const u8, params: ?RawJson = null };
 
 pub const StartParams = struct {
     provider: []const u8,
@@ -101,6 +103,8 @@ pub const RespondParams = struct {
     permission: ?types.PermissionResponse = null,
     user_input: ?types.UserInputResponse = null,
     elicitation: ?types.ElicitationResponse = null,
+    dialog: ?types.DialogResponse = null,
+    native: ?types.NativeResponse = null,
 };
 
 /// `session/event` notification.
@@ -134,11 +138,13 @@ const Method = enum {
     @"provider/readHistory",
     @"provider/deleteSession",
     @"provider/listSubagents",
+    @"provider/call",
     @"session/start",
     @"session/fork",
     @"session/send",
     @"session/wait",
     @"session/info",
+    @"session/state",
     @"session/interrupt",
     @"session/interruptTurn",
     @"session/setModel",
@@ -154,10 +160,11 @@ const Method = enum {
     @"session/close",
     @"request/respond",
 
-    /// Methods that change a session run in arrival order.
+    /// Methods that change a session run in arrival order. `session/call`
+    /// runs at once, so a native call is not stuck behind a compaction.
     fn ordered(m: Method) bool {
         return switch (m) {
-            .@"session/wait", .@"session/interrupt", .@"session/interruptTurn", .@"session/close", .@"request/respond", .@"session/info", .@"session/pendingRequests" => false,
+            .@"session/wait", .@"session/interrupt", .@"session/interruptTurn", .@"session/close", .@"request/respond", .@"session/info", .@"session/state", .@"session/pendingRequests", .@"session/call" => false,
             else => std.mem.startsWith(u8, @tagName(m), "session/"),
         };
     }
@@ -824,6 +831,10 @@ const Job = struct {
                 const p = try job.param(ListSubagentsParams);
                 job.reply(try (try s.provider(p.provider, diag)).listSubagents(a, p.session_id, p.cwd, diag));
             },
+            .@"provider/call" => {
+                const p = try job.param(ProviderCallParams);
+                job.reply(try (try s.provider(p.provider, diag)).call(p.method, p.params, a, diag));
+            },
             .@"session/start" => {
                 const p = try job.param(StartParams);
                 const prov = try s.provider(p.provider, diag);
@@ -846,6 +857,7 @@ const Job = struct {
                 job.reply(try sess.wait(p.turn_id, a, timeout, diag));
             },
             .@"session/info" => job.reply(try sess.info(a)),
+            .@"session/state" => job.reply(try sess.state(a)),
             .@"session/interrupt" => {
                 try sess.interrupt(diag);
                 job.reply(no_result);
@@ -874,10 +886,7 @@ const Job = struct {
                 try sess.compact((try job.param(CompactParams)).instructions, diag);
                 job.reply(no_result);
             },
-            .@"session/rewind" => {
-                try sess.rewind((try job.param(TurnParams)).turn_id, diag);
-                job.reply(no_result);
-            },
+            .@"session/rewind" => job.reply(try sess.rewind((try job.param(TurnParams)).turn_id, a, diag)),
             .@"session/stopTask" => {
                 try sess.stopTask((try job.param(StopTaskParams)).task_id, diag);
                 job.reply(no_result);
@@ -908,7 +917,7 @@ const Job = struct {
             },
             .@"request/respond" => {
                 const p = try job.param(RespondParams);
-                const resp: types.Response = if (p.permission) |r| .{ .permission = r } else if (p.user_input) |r| .{ .user_input = r } else if (p.elicitation) |r| .{ .elicitation = r } else return errors.fail(diag, .invalid_params, "request/respond needs permission, user_input, or elicitation", .{});
+                const resp: types.Response = if (p.permission) |r| .{ .permission = r } else if (p.user_input) |r| .{ .user_input = r } else if (p.elicitation) |r| .{ .elicitation = r } else if (p.dialog) |r| .{ .dialog = r } else if (p.native) |r| .{ .native = r } else return errors.fail(diag, .invalid_params, "request/respond needs permission, user_input, elicitation, dialog, or native", .{});
                 try sess.respond(p.request_id, resp, diag);
                 job.reply(no_result);
             },
@@ -1102,4 +1111,177 @@ test "rpc: a closing session's handle stays taken until it is freed" {
     try std.testing.expect(handle_taken(s, "h"));
     e.destroy();
     try std.testing.expect(!handle_taken(s, "h"));
+}
+
+/// A server with the fake provider and one session under `handle`, for
+/// tests.
+const TestServer = struct {
+    threaded: Io.Threaded,
+    server: *Server,
+    arena: std.heap.ArenaAllocator,
+
+    const wait_limit: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } };
+
+    fn start(t: *TestServer, handle: []const u8) !void {
+        const gpa = std.testing.allocator;
+        t.threaded = .init(gpa, .{});
+        t.arena = .init(gpa);
+        t.server = try Server.create(.{ .io = t.threaded.io(), .gpa = gpa, .environ = .empty });
+        t.server.receive(
+            \\{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"providers":{"fake":null}}}
+        );
+        _ = try t.reply(1);
+        t.send("{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/start\",\"params\":{{\"provider\":\"fake\",\"handle\":\"{s}\"}}}}", .{handle});
+        _ = try t.reply(2);
+    }
+
+    fn deinit(t: *TestServer) void {
+        t.server.destroy();
+        t.arena.deinit();
+        t.threaded.deinit();
+    }
+
+    fn send(t: *TestServer, comptime fmt: []const u8, args: anytype) void {
+        t.server.receive(std.fmt.allocPrint(t.arena.allocator(), fmt, args) catch @panic("out of memory"));
+    }
+
+    /// The next message, failing the test when none arrives in time.
+    fn next(t: *TestServer) !json.JsonView {
+        const m = (try t.server.recv(wait_limit)) orelse return error.TestTimedOut;
+        defer t.server.env.gpa.free(m);
+        const a = t.arena.allocator();
+        return json.JsonView.parseBytes(a, try a.dupe(u8, m));
+    }
+
+    /// Reads until the answer to request `id`.
+    fn reply(t: *TestServer, id: i64) !json.JsonView {
+        while (true) {
+            const msg = try t.next();
+            if (msg.str("method").len == 0 and msg.int("id") == id) return msg;
+        }
+    }
+
+    /// Reads until a session event of type `event_type`.
+    fn event(t: *TestServer, event_type: []const u8) !json.JsonView {
+        while (true) {
+            const msg = try t.next();
+            if (!std.mem.eql(u8, msg.str("method"), "session/event")) continue;
+            const ev = msg.get("params").get("event");
+            if (std.mem.eql(u8, ev.str("type"), event_type)) return ev;
+        }
+    }
+};
+
+test "rpc: session/call runs while a compaction blocks the session" {
+    var t: TestServer = undefined;
+    try t.start("c");
+    defer t.deinit();
+    t.send(
+        \\{{"jsonrpc":"2.0","id":3,"method":"session/compact","params":{{"session":"c"}}}}
+    , .{});
+    _ = try t.event("compaction");
+    t.send(
+        \\{{"jsonrpc":"2.0","id":4,"method":"session/call","params":{{"session":"c","method":"echo","params":{{"x":1}}}}}}
+    , .{});
+    // The call is answered while the compaction still waits.
+    while (true) {
+        const msg = try t.next();
+        if (msg.str("method").len > 0) continue;
+        try std.testing.expectEqual(@as(i64, 4), msg.int("id"));
+        try std.testing.expectEqual(@as(i64, 1), msg.get("result").int("x"));
+        break;
+    }
+    t.send(
+        \\{{"jsonrpc":"2.0","id":5,"method":"session/call","params":{{"session":"c","method":"finish_compaction"}}}}
+    , .{});
+    var compacted = false;
+    var finished = false;
+    while (!(compacted and finished)) {
+        const msg = try t.next();
+        if (msg.str("method").len > 0) continue;
+        try std.testing.expect(!msg.has("error"));
+        if (msg.int("id") == 3) compacted = true;
+        if (msg.int("id") == 5) finished = true;
+    }
+}
+
+test "rpc: dialog and native requests are answered with request/respond" {
+    var t: TestServer = undefined;
+    try t.start("d");
+    defer t.deinit();
+
+    t.send(
+        \\{{"jsonrpc":"2.0","id":3,"method":"session/send","params":{{"session":"d","turn_id":"t-1","input":{{"text":"dialog"}}}}}}
+    , .{});
+    const dialog = try t.event("dialog_request");
+    try std.testing.expectEqualStrings("fake_dialog", dialog.str("kind"));
+    // An answer of another kind is refused and leaves the request pending.
+    t.send(
+        \\{{"jsonrpc":"2.0","id":4,"method":"request/respond","params":{{"session":"d","request_id":"{s}","native":{{}}}}}}
+    , .{dialog.str("id")});
+    try std.testing.expectEqualStrings("invalid_answer", (try t.reply(4)).get("error").get("data").str("kind"));
+    t.send(
+        \\{{"jsonrpc":"2.0","id":5,"method":"request/respond","params":{{"session":"d","request_id":"{s}","dialog":{{"behavior":"completed","result":{{"ok":true}}}}}}}}
+    , .{dialog.str("id")});
+    const resolved = try t.event("request_resolved");
+    try std.testing.expectEqualStrings("dialog", resolved.str("kind"));
+    try std.testing.expectEqualStrings("answered", resolved.str("outcome"));
+    t.send(
+        \\{{"jsonrpc":"2.0","id":6,"method":"session/wait","params":{{"session":"d","turn_id":"t-1"}}}}
+    , .{});
+    try std.testing.expectEqualStrings("dialog completed {\"ok\":true}", (try t.reply(6)).get("result").str("text"));
+
+    t.send(
+        \\{{"jsonrpc":"2.0","id":7,"method":"session/send","params":{{"session":"d","turn_id":"t-2","input":{{"text":"native"}}}}}}
+    , .{});
+    const native = try t.event("native_request");
+    try std.testing.expectEqualStrings("fake/ping", native.str("method"));
+    t.send(
+        \\{{"jsonrpc":"2.0","id":8,"method":"request/respond","params":{{"session":"d","request_id":"{s}","native":{{"error":{{"code":-32001,"message":"no"}}}}}}}}
+    , .{native.str("id")});
+    t.send(
+        \\{{"jsonrpc":"2.0","id":9,"method":"session/wait","params":{{"session":"d","turn_id":"t-2"}}}}
+    , .{});
+    try std.testing.expectEqualStrings("native error -32001 no", (try t.reply(9)).get("result").str("text"));
+}
+
+test "rpc: provider/call, session/rewind, and session/state" {
+    var t: TestServer = undefined;
+    try t.start("r");
+    defer t.deinit();
+
+    t.send(
+        \\{{"jsonrpc":"2.0","id":3,"method":"provider/call","params":{{"provider":"fake","method":"account/read"}}}}
+    , .{});
+    try std.testing.expectEqualStrings("unsupported", (try t.reply(3)).get("error").get("data").str("kind"));
+
+    t.send(
+        \\{{"jsonrpc":"2.0","id":4,"method":"session/state","params":{{"session":"r"}}}}
+    , .{});
+    const before = (try t.reply(4)).get("result");
+    const first_id = before.get("info").str("id");
+    try std.testing.expect(first_id.len > 0);
+
+    t.send(
+        \\{{"jsonrpc":"2.0","id":5,"method":"session/send","params":{{"session":"r","turn_id":"t-1","input":{{"text":"hello"}}}}}}
+    , .{});
+    t.send(
+        \\{{"jsonrpc":"2.0","id":6,"method":"session/wait","params":{{"session":"r","turn_id":"t-1"}}}}
+    , .{});
+    _ = try t.reply(6);
+    t.send(
+        \\{{"jsonrpc":"2.0","id":7,"method":"session/rewind","params":{{"session":"r","turn_id":"t-1"}}}}
+    , .{});
+    const changed = try t.event("session_id_changed");
+    try std.testing.expectEqualStrings(first_id, changed.str("previous_id"));
+    try std.testing.expectEqualStrings("rewind", changed.str("reason"));
+    const rewound = (try t.reply(7)).get("result");
+    try std.testing.expectEqualStrings(changed.str("id"), rewound.str("session_id"));
+    try std.testing.expectEqualStrings("msg-t-1", rewound.get("removed_item_ids").index(0).string());
+
+    t.send(
+        \\{{"jsonrpc":"2.0","id":8,"method":"session/state","params":{{"session":"r"}}}}
+    , .{});
+    const after = (try t.reply(8)).get("result");
+    try std.testing.expectEqualStrings(changed.str("id"), after.get("info").str("id"));
 }

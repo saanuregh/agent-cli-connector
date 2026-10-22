@@ -2,7 +2,11 @@
 //! complete provider implementation. Each turn streams its prompt back. A
 //! prompt containing "permission" first asks for permission to run a tool;
 //! one containing "tool:<name>" calls that host tool and replies with its
-//! result.
+//! result. One containing "dialog" or "native" sends a `dialog_request` or
+//! `native_request` and replies with the answer; one containing "task" runs
+//! a background task for the turn. Compaction waits until the session call
+//! "finish_compaction"; the call "echo" returns its params. Rewinding
+//! continues under a new session ID.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const agent = @import("../root.zig");
@@ -29,6 +33,12 @@ const capabilities: types.Capabilities = .{
     .permission_prompt = true,
     .host_tools = true,
     .permission_modes = &.{ types.permission_mode.default, types.permission_mode.bypass },
+    .rewind = true,
+    .compact = true,
+    .tasks = true,
+    .rewind_changes_session_id = true,
+    .dialogs = true,
+    .native_requests = true,
 };
 
 const Provider = struct {
@@ -62,6 +72,12 @@ const FakeSession = struct {
     options: Options,
     mutex: std.Io.Mutex = .init,
     answer: ?types.PermissionDecision = null,
+    /// The answer to a dialog or native request, as reply text (gpa).
+    reply: ?[]u8 = null,
+    /// A compaction waits for `finish_compaction`.
+    compacting: bool = false,
+    /// Completed turns, oldest first, for rewinding.
+    turns: std.ArrayList(agent.Id) = .empty,
     answered: std.Io.Condition = .init,
     stop: std.atomic.Value(bool) = .init(false),
     /// Set by `close`: queued input no longer starts.
@@ -75,10 +91,19 @@ const FakeSession = struct {
         .close = close,
         .destroy = destroy,
         .set_model = setModel,
+        .compact = compact,
+        .rewind = rewind,
+        .call = call,
     };
 
     fn of(s: *Session) *FakeSession {
         return @fieldParentPtr("session", s);
+    }
+
+    /// Frees the reply. Call with `mutex` held.
+    fn clearReply(fs: *FakeSession) void {
+        if (fs.reply) |r| fs.session.rt.env.gpa.free(r);
+        fs.reply = null;
     }
 };
 
@@ -145,6 +170,15 @@ fn runTurn(job: *Job) void {
     rt.emit(.{ .turn_id = turn, .payload = .{ .status_changed = .{ .status = .running } } });
 
     var reply: []const u8 = job.prompt;
+    const has_task = std.mem.indexOf(u8, job.prompt, "task") != null;
+    if (has_task) rt.emit(.{ .turn_id = turn, .payload = .{ .task_updated = .{ .task = .{ .id = "task-1", .kind = .shell, .description = "fake task" } } } });
+    const request_id = rt.env.uuid();
+    if (std.mem.indexOf(u8, job.prompt, "dialog") != null) {
+        reply = ask(fs, a, .{ .dialog_request = .{ .id = request_id.slice(), .kind = "fake_dialog" } });
+    }
+    if (std.mem.indexOf(u8, job.prompt, "native") != null) {
+        reply = ask(fs, a, .{ .native_request = .{ .id = request_id.slice(), .method = "fake/ping", .params = .of("{}") } });
+    }
     if (std.mem.indexOf(u8, job.prompt, "permission") != null) {
         const decision = askPermission(fs);
         if (decision != .allow and decision != .allow_session and decision != .allow_always) reply = "permission denied";
@@ -173,6 +207,13 @@ fn runTurn(job: *Job) void {
         if (fs.options.delay_ms > 0) rt.env.io.sleep(.fromMilliseconds(fs.options.delay_ms), .awake) catch {};
     }
     rt.emit(.{ .turn_id = turn, .payload = .{ .item_completed = .{ .item = .{ .id = item_id, .kind = .assistant_message, .text = reply, .turn_id = turn } } } });
+    if (has_task) rt.emit(.{ .turn_id = turn, .payload = .{ .task_updated = .{ .task = .{ .id = "task-1", .kind = .shell, .status = .completed, .description = "fake task" } } } });
+    {
+        const io = rt.env.io;
+        fs.mutex.lockUncancelable(io);
+        defer fs.mutex.unlock(io);
+        fs.turns.append(rt.env.gpa, job.id) catch {};
+    }
     rt.emit(.{ .turn_id = turn, .payload = .{ .status_changed = .{ .status = .idle } } });
     rt.finishTurn(turn, .{
         .status = status,
@@ -202,6 +243,23 @@ fn askPermission(fs: *FakeSession) types.PermissionDecision {
     return fs.answer orelse .cancel;
 }
 
+/// Sends a dialog or native request and waits for its answer, as reply
+/// text allocated from `a`.
+fn ask(fs: *FakeSession, a: Allocator, payload: types.Event.Payload) []const u8 {
+    const rt = &fs.session.rt;
+    const io = rt.env.io;
+    fs.mutex.lockUncancelable(io);
+    fs.clearReply();
+    fs.mutex.unlock(io);
+    rt.request(payload, null, "");
+    fs.mutex.lockUncancelable(io);
+    defer fs.mutex.unlock(io);
+    while (fs.reply == null and !fs.stop.load(.acquire)) fs.answered.waitUncancelable(io, &fs.mutex);
+    const text = fs.reply orelse return "request withdrawn";
+    defer fs.clearReply();
+    return a.dupe(u8, text) catch "";
+}
+
 /// Waits up to `ms` for an interrupt.
 fn awaitStop(fs: *FakeSession, ms: i64) void {
     const io = fs.session.rt.env.io;
@@ -214,10 +272,85 @@ fn awaitStop(fs: *FakeSession, ms: i64) void {
 fn respond(s: *Session, _: *const Session.Pending, resp: types.Response, _: ?*Diagnostics) errors.Error!void {
     const fs = FakeSession.of(s);
     const io = s.rt.env.io;
+    const gpa = s.rt.env.gpa;
+    // Built before taking the lock: allocation may fail.
+    const reply: ?[]u8 = switch (resp) {
+        .permission, .user_input, .elicitation => null,
+        .dialog => |d| if (d.result) |r|
+            try std.fmt.allocPrint(gpa, "dialog {t} {s}", .{ d.behavior, r.bytes })
+        else
+            try std.fmt.allocPrint(gpa, "dialog {t}", .{d.behavior}),
+        .native => |n| if (n.@"error") |e|
+            try std.fmt.allocPrint(gpa, "native error {d} {s}", .{ e.code, e.message })
+        else
+            try std.fmt.allocPrint(gpa, "native result {s}", .{if (n.result) |r| r.bytes else "null"}),
+    };
     fs.mutex.lockUncancelable(io);
     defer fs.mutex.unlock(io);
-    fs.answer = resp.permission.decision;
+    switch (resp) {
+        .permission => |p| fs.answer = p.decision,
+        else => {
+            fs.clearReply();
+            fs.reply = reply;
+        },
+    }
     fs.answered.broadcast(io);
+}
+
+/// Stands in for a harness whose compaction takes a while: it waits until
+/// the session call "finish_compaction" or the session closes.
+fn compact(s: *Session, _: []const u8, diag: ?*Diagnostics) errors.Error!void {
+    const fs = FakeSession.of(s);
+    const io = s.rt.env.io;
+    s.rt.emitPayload(.{ .status_changed = .{ .status = .compacting } }, null);
+    s.rt.emitPayload(.{ .compaction = .{ .trigger = "manual" } }, null);
+    fs.mutex.lockUncancelable(io);
+    fs.compacting = true;
+    while (fs.compacting and !fs.closing.load(.acquire)) fs.answered.waitUncancelable(io, &fs.mutex);
+    const finished = !fs.compacting;
+    fs.compacting = false;
+    fs.mutex.unlock(io);
+    if (!finished) return errors.fail(diag, .closed, "session closed during compaction", .{});
+    s.rt.emitPayload(.{ .compaction = .{ .trigger = "manual", .done = true } }, null);
+    s.rt.emitPayload(.{ .status_changed = .{ .status = .idle } }, null);
+}
+
+/// Drops the turn and every later one, and continues under a new session
+/// ID.
+fn rewind(s: *Session, turn_id: []const u8, a: Allocator, diag: ?*Diagnostics) errors.Error!types.RewindResult {
+    const fs = FakeSession.of(s);
+    const io = s.rt.env.io;
+    if (!s.rt.idle()) return errors.fail(diag, .invalid_params, "fake: cannot rewind while a turn runs", .{});
+    var removed: std.ArrayList([]const u8) = .empty;
+    {
+        fs.mutex.lockUncancelable(io);
+        defer fs.mutex.unlock(io);
+        const at = agent.runtime.indexOfId(fs.turns.items, turn_id) orelse
+            return errors.fail(diag, .not_found, "fake: turn {s} not found", .{turn_id});
+        for (fs.turns.items[at..]) |*t| try removed.append(a, try std.fmt.allocPrint(a, "msg-{s}", .{t.slice()}));
+        fs.turns.shrinkRetainingCapacity(at);
+    }
+    s.rt.emitPayload(.{ .items_removed = .{ .ids = removed.items } }, null);
+    const generated = s.rt.env.uuid();
+    const new_id = try a.dupe(u8, generated.slice());
+    var info = try s.rt.sessionInfo(a);
+    info.id = new_id;
+    s.rt.setInfoFor(info, true, .rewind);
+    return .{ .session_id = new_id, .removed_item_ids = removed.items };
+}
+
+fn call(s: *Session, method: []const u8, params: ?agent.json.RawJson, a: Allocator, diag: ?*Diagnostics) errors.Error!?agent.json.RawJson {
+    const fs = FakeSession.of(s);
+    if (std.mem.eql(u8, method, "echo")) return if (params) |p| .of(try a.dupe(u8, p.bytes)) else null;
+    if (std.mem.eql(u8, method, "finish_compaction")) {
+        const io = s.rt.env.io;
+        fs.mutex.lockUncancelable(io);
+        defer fs.mutex.unlock(io);
+        fs.compacting = false;
+        fs.answered.broadcast(io);
+        return null;
+    }
+    return errors.unsupported(diag, name, method);
 }
 
 fn interrupt(s: *Session, _: ?*Diagnostics) errors.Error!void {
@@ -244,6 +377,7 @@ fn setModel(s: *Session, model: []const u8, _: ?*Diagnostics) errors.Error!void 
 
 fn close(s: *Session) void {
     FakeSession.of(s).closing.store(true, .release);
+    // `interrupt` also wakes a compaction, which then sees `closing`.
     interrupt(s, null) catch unreachable; // never fails
     // A running turn notices the stop and ends before the session does.
     s.rt.closeTasks();
@@ -251,6 +385,8 @@ fn close(s: *Session) void {
 
 fn destroy(s: *Session) void {
     const fs = FakeSession.of(s);
+    fs.clearReply();
+    fs.turns.deinit(s.rt.env.gpa);
     s.rt.env.gpa.destroy(fs);
 }
 
@@ -316,4 +452,31 @@ test "fake provider: a request handler answers instead of an event" {
         defer ev.destroy();
         try std.testing.expect(ev.event.payload != .permission_request);
     } else |_| {}
+}
+
+test "fake provider: dialog and native callbacks answer their requests" {
+    const gpa = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const env: Env = .{ .io = threaded.io(), .gpa = gpa, .environ = .empty };
+
+    const provider = try create(env, .{});
+    defer provider.deinit();
+    const Handler = struct {
+        fn dialog(_: ?*anyopaque, req: *const types.DialogRequest) types.DialogResponse {
+            std.debug.assert(std.mem.eql(u8, req.kind, "fake_dialog"));
+            return .{ .behavior = .cancelled };
+        }
+        fn native(_: ?*anyopaque, req: *const types.NativeRequest) types.NativeResponse {
+            std.debug.assert(std.mem.eql(u8, req.method, "fake/ping"));
+            return .{ .result = .of("\"pong\"") };
+        }
+    };
+    const s = try provider.start(.{ .request_handler = .{ .dialog = Handler.dialog, .native = Handler.native } }, null);
+    defer s.deinit();
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("dialog cancelled", (try s.run(.{ .text = "dialog" }, arena.allocator(), .none, null)).text);
+    try std.testing.expectEqualStrings("native result \"pong\"", (try s.run(.{ .text = "native" }, arena.allocator(), .none, null)).text);
 }

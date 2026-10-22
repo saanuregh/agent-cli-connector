@@ -26,8 +26,10 @@
 //!     supported (Codex assigns thread IDs).
 //!   - McpServer.enabled_tools maps to enabled_tools and approved_tools to
 //!     tools.<name>.approval_mode = "approve"; always_load is ignored.
-//!   - env and unset_env apply to a dedicated app-server only. On a shared
-//!     server env and wire_tap are ignored, and unset_env is refused.
+//!   - env, unset_env, and command_prefix apply to a dedicated app-server
+//!     only. On a shared server env, command_prefix, and wire_tap are
+//!     ignored, and unset_env is refused; `Options.command_prefix` wraps
+//!     the shared server.
 //!   - output_schema applies to every turn without `Input.output_schema`;
 //!     both are normalized to OpenAI strict form unless
 //!     `SessionOptions.disable_strict_output_schema` is set.
@@ -43,9 +45,19 @@
 //!   - A permission answer cannot change a call's arguments, so an allowing
 //!     answer with `updated_input` is refused.
 //!   - A file part is sent as text holding its absolute path.
-//!   - Server requests the library does not handle, such as
-//!     account/chatgptAuthTokens/refresh, are answered with JSON-RPC error
-//!     -32601.
+//!   - A thread's server requests without a uniform meaning become
+//!     `native_request` events, answered with a JSON-RPC result or error.
+//!     Requests for no thread, such as account/chatgptAuthTokens/refresh,
+//!     are answered with JSON-RPC error -32601, except currentTime/read.
+//!   - Closing a session on a shared server only unsubscribes its thread:
+//!     its turn is not interrupted, and its pending requests are withdrawn
+//!     without an answer to Codex.
+//!   - Rewind reverts the thread in place; a thread without paginated
+//!     history cannot be rewound.
+//!   - Turns ask for "detailed" reasoning summaries unless
+//!     `reasoning_summary` is set.
+//!   - `Provider.call` sends an app-server method without a thread, on the
+//!     shared server or a short-lived one.
 const std = @import("std");
 const agent = @import("agent");
 const options = @import("options.zig");
@@ -84,4 +96,5 @@ test {
     _ = @import("translate.zig");
     _ = @import("history.zig");
     _ = @import("live_test.zig");
+    _ = @import("app_server_test.zig");
 }

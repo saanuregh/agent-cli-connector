@@ -152,12 +152,10 @@ pub fn stopTask(session: *Session, task_id: []const u8, diag: ?*Diagnostics) Err
     _ = try codex.threadCall(a, "turn/interrupt", params, 0, diag);
 }
 
-/// Removes `turn_id` and every later turn from the thread history. A
-/// paginated thread is reverted in place with thread/revert. A legacy
-/// thread, or one whose revert fails, is forked before `turn_id` and the
-/// session continues on the fork: its ID changes, which `session_updated`
-/// reports, and the original thread stays unchanged.
-pub fn rewind(session: *Session, turn_id: []const u8, diag: ?*Diagnostics) Error!void {
+/// Removes `turn_id` and every later turn from the thread history with
+/// thread/revert. The session ID does not change. A thread without
+/// paginated history cannot be reverted, so its rewind fails.
+pub fn rewind(session: *Session, turn_id: []const u8, out: Allocator, diag: ?*Diagnostics) Error!types.RewindResult {
     const codex = CodexSession.of(session);
     var arena: std.heap.ArenaAllocator = .init(codex.env.gpa);
     defer arena.deinit();
@@ -165,62 +163,20 @@ pub fn rewind(session: *Session, turn_id: []const u8, diag: ?*Diagnostics) Error
     if (!codex.rt().idle()) return errors.fail(diag, .invalid_params, "codex: cannot rewind while a turn runs", .{});
     var read = try codex.threadIdParams(a);
     try read.put("includeTurns", .{ .bool = false });
-    const mode: ?[]const u8 = if (codex.threadCall(a, "thread/read", read.value(), 0, null)) |response|
-        providerkit.firstOf(&.{ response.get("thread").str("historyMode"), "legacy" })
-    else |_|
-        null;
+    // When the thread cannot be read, the revert decides.
+    if (codex.threadCall(a, "thread/read", read.value(), 0, null)) |response| {
+        const mode = providerkit.firstOf(&.{ response.get("thread").str("historyMode"), "legacy" });
+        if (!std.mem.eql(u8, mode, "paginated")) return errors.fail(diag, .unsupported, "codex: rewind needs a paginated thread", .{});
+    } else |_| {}
+    var params = try codex.threadIdParams(a);
+    try params.str("beforeTurnId", turn_id);
     var revert_diag: Diagnostics = .{};
-    var revert_error: ?types.ErrorInfo = null;
-    if (mode == null or std.mem.eql(u8, mode.?, "paginated")) {
-        var params = try codex.threadIdParams(a);
-        try params.str("beforeTurnId", turn_id);
-        if (codex.threadCall(a, "thread/revert", params.value(), 0, &revert_diag)) |_| {
-            translate.rewound(codex, a, turn_id);
-            return;
-        } else |e| revert_error = Diagnostics.of(&revert_diag, e);
-    }
-    var fork_diag: Diagnostics = .{};
-    forkBefore(codex, a, turn_id, &fork_diag) catch |e| {
-        var info = Diagnostics.of(&fork_diag, e);
-        info.message = if (revert_error) |revert|
-            try std.fmt.allocPrint(a, "codex: rewind: thread/revert: {s}; thread/fork: {s}", .{ revert.message, info.message })
-        else
-            try std.fmt.allocPrint(a, "codex: rewind: {s}", .{info.message});
+    _ = codex.threadCall(a, "thread/revert", params.value(), 0, &revert_diag) catch |e| {
+        var info = Diagnostics.of(&revert_diag, e);
+        info.message = try std.fmt.allocPrint(a, "codex: rewind: {s}", .{info.message});
         return errors.failWith(diag, info);
     };
-    translate.rewound(codex, a, turn_id);
-}
-
-/// Forks the thread before `turn_id` and moves the session to the fork.
-fn forkBefore(codex: *CodexSession, a: Allocator, turn_id: []const u8, diag: ?*Diagnostics) Error!void {
-    const old = try a.dupe(u8, codex.threadId().slice());
-    var cfg = providerkit.inheritConfig(.{}, codex.cfg, try codex.rt().sessionInfo(a));
-    cfg.resume_id = old;
-    cfg.fork = true;
-    var params = try codex.threadParams(a, cfg, codex.opts);
-    try params.str("threadId", old);
-    try params.str("beforeTurnId", turn_id);
-    try params.put("excludeTurns", .{ .bool = true });
-    const raw = try codex.client.call(a, "thread/fork", params.value(), .{ .owner = codex }, diag);
-    const response = JsonView.parseBytes(a, raw.bytes);
-    const id = response.get("thread").str("id");
-    if (id.len == 0) return errors.fail(diag, .protocol, "codex: decode thread/fork: no thread ID", .{});
-    codex.mutex.lockUncancelable(codex.env.io);
-    codex.thread = .of(id);
-    codex.mutex.unlock(codex.env.io);
-    codex.rememberSandbox(a, response.get("sandbox"));
-    codex.client.rekey(old, id, codex);
-    codex.rt().setSessionId(id);
-    {
-        codex.mutex.lockUncancelable(codex.env.io);
-        defer codex.mutex.unlock(codex.env.io);
-        // The fork's token totals start from its own history.
-        codex.translator.have_total = false;
-        codex.updateInfo(.{ .id = id });
-    }
-    _ = codex.threadCall(a, "thread/unsubscribe", try agent.json.toValue(a, .{ .threadId = old }), 0, null) catch |e|
-        log.debug("codex: unsubscribing the rewound thread {s} failed: {t}", .{ old, e });
-    codex.client.forget(old);
+    return .{ .removed_item_ids = try translate.rewound(codex, out, turn_id) };
 }
 
 /// Copies the thread into a new session on the same app-server. Empty
@@ -338,6 +294,18 @@ fn readWorkspaceWrite(codex: *CodexSession, a: Allocator) Error!?[]const u8 {
     try policy.put("excludeSlashTmp", .{ .bool = workspace_write.flag("exclude_slash_tmp") });
     try policy.put("excludeTmpdirEnvVar", .{ .bool = workspace_write.flag("exclude_tmpdir_env_var") });
     return try agent.json.encodeValue(a, policy.value());
+}
+
+/// model_context_window from config/read, or 0 when it is not set or
+/// cannot be read. Codex reports no other context window before the first
+/// usage update (see the Codex version in REFERENCES.md).
+pub fn configuredContextWindow(codex: *CodexSession, a: Allocator, cwd: []const u8) i64 {
+    const params = agent.json.toValue(a, .{ .includeLayers = false, .cwd = if (cwd.len > 0) cwd else null }) catch return 0;
+    const response = codex.client.callJson(a, "config/read", params, .{ .owner = codex, .timeout_ms = 10_000 }, null) catch |e| {
+        log.debug("codex: reading model_context_window failed: {t}", .{e});
+        return 0;
+    };
+    return @max(response.get("config").int("model_context_window"), 0);
 }
 
 /// Restores an archived thread. A thread that is not archived is not an

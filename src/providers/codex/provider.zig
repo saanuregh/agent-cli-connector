@@ -66,12 +66,22 @@ pub fn capabilities(opts: Options) types.Capabilities {
         .rate_limits = true,
         .hooks = true,
         .goals = true,
+        .tool_output_stream = true,
+        .plan_stream = true,
+        // A rewind reverts the thread in place.
+        .rewind_changes_session_id = false,
+        .requests_from_subagents = true,
+        .background_turns = true,
+        .steer_interrupts_tools = false,
+        .dialogs = false,
+        .native_requests = true,
         .check = true,
         .list_models = true,
         .list_sessions = true,
         .read_history = true,
         .delete_session = true,
         .list_subagents = true,
+        .provider_call = true,
     };
 }
 
@@ -93,6 +103,7 @@ pub fn create(env: agent.Env, provider_options: Options) !agent.Provider {
         .read_history = history.readHistory,
         .delete_session = history.deleteSession,
         .list_subagents = history.listSubagents,
+        .call = call,
     };
     return .{ .ptr = provider, .vtable = &provider.vtable };
 }
@@ -127,6 +138,7 @@ fn start(ptr: *anyopaque, opts: agent.StartOptions, diag: ?*Diagnostics) Error!*
         .cwd = opts.config.cwd,
         .env = opts.config.env,
         .unset_env = opts.config.unset_env,
+        .command_prefix = opts.config.command_prefix,
         .tap = if (opts.config.wire_tap) codex.rt() else null,
     }, diag) else sharedClient(provider, diag);
     const client = started catch |e| {
@@ -160,6 +172,14 @@ fn sharedClient(provider: *Provider, diag: ?*Diagnostics) Error!*Client {
 pub fn acquire(provider: *Provider, diag: ?*Diagnostics) Error!*Client {
     if (provider.opts.shared_server) return sharedClient(provider, diag);
     return Client.start(provider.env, provider.opts, .{}, diag);
+}
+
+/// Sends an app-server method that needs no thread, such as account/read,
+/// on the shared app-server or a short-lived one, and returns the result.
+fn call(ptr: *anyopaque, method: []const u8, params: ?agent.json.RawJson, a: Allocator, diag: ?*Diagnostics) Error!?agent.json.RawJson {
+    const client = try acquire(of(ptr), diag);
+    defer client.release();
+    return try client.callRaw(a, method, if (params) |raw| raw.bytes else null, .{}, diag);
 }
 
 /// Reports the installed version from "codex --version" and the sign-in

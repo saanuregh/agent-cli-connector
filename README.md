@@ -67,7 +67,7 @@ zig build release                    # every platform's files into zig-out/relea
 ### Prebuilt libraries
 
 The bindings do not need a local Zig build: they fetch the library from the GitHub release for their version
-(`v0.2.0` for 0.2.0), into the user cache, and check it against the release's `SHA256SUMS`. Releases carry the shared
+(`v0.3.0` for 0.3.0), into the user cache, and check it against the release's `SHA256SUMS`. Releases carry the shared
 and static library and `agentd` for `linux-x86_64`, `linux-aarch64` (glibc 2.28 or newer), `macos-x86_64`,
 `macos-aarch64`, and `windows-x86_64`. Pushing a tag `v<version>` that matches `library_version` builds and
 publishes them (`.github/workflows/release.yml`).
@@ -94,14 +94,31 @@ over standard input and output, one JSON message per line.
 
 | Concept | Zig | Purpose |
 | --- | --- | --- |
-| Provider | `agent.Provider` | Starts sessions for one harness; `check`, `listModels`, `listSessions`, `readHistory`, `deleteSession`, `listSubagents`. |
-| Session | `*agent.Session` | One live conversation: `send`, `run`, `wait`, `interrupt`, `interruptTurn`, `setModel`, `setEffort`, `setPermissionMode`, `setTitle`, `compact`, `rewind`, `fork`, `stopTask`, `rateLimits`, `call`, `respond`, `close`. |
+| Provider | `agent.Provider` | Starts sessions for one harness; `check`, `listModels`, `listSessions`, `readHistory`, `deleteSession`, `listSubagents`, `call`. |
+| Session | `*agent.Session` | One live conversation: `send`, `run`, `wait`, `interrupt`, `interruptTurn`, `setModel`, `setEffort`, `setPermissionMode`, `setTitle`, `compact`, `rewind`, `fork`, `stopTask`, `rateLimits`, `call`, `state`, `respond`, `close`. |
 | Input | `types.Input` | Text and parts (images, files, skills, mentions), per-turn model/effort/output schema, delivery mode. |
 | Turn | `agent.Turn`, which `send` returns | `nextEvent` streams the turn's own events; `wait` returns a `TurnResult`: status, final text, structured output, usage, cost, items, error; `interrupt`. |
-| Events | `types.Event` | Typed stream: text/reasoning/tool deltas, transcript items, plans, tasks, usage, compaction, retries, notices, requests. |
-| Requests | `permission_request`, `user_input_request`, `elicitation_request` events | Answered with `respond`, or by a `StartOptions.request_handler` callback instead of an event. The bindings add handler callbacks and `allow`/`deny`/`answer`/`accept`/`decline` on the request itself. |
+| Events | `types.Event` | Typed stream: text/reasoning/tool deltas, transcript items, plans, tasks, usage, compaction, retries, notices, requests, session ID changes. |
+| State | `types.SessionState`, from `state` | A snapshot for a client that (re)connects: status, running and queued turns, unfinished tasks, pending requests, latest usage, info, and `background_work`. |
+| Requests | `permission_request`, `user_input_request`, `elicitation_request`, `dialog_request`, `native_request` events | Answered with `respond`, or by a `StartOptions.request_handler` callback instead of an event. The bindings add handler callbacks and `allow`/`deny`/`answer`/`accept`/`decline`/`complete`/`cancel`/`reply`/`fail` on the request itself; a request a callback answers is still delivered, marked handled. A failing callback answers with the safe choice: deny, cancel, or an error. |
 | Host tools | `Config.tools` + `StartOptions.tool_handler` | Functions of your program the model can call, on every harness. Interrupting a turn cancels its running calls (Go: the handler's `ctx`; TypeScript: an `AbortSignal`; Rust: the `CancelToken` passed to the `Tool::new` handler). |
-| Capabilities | `types.Capabilities` | One flag per feature; an unsupported call fails with `unsupported`. |
+| Capabilities | `types.Capabilities` | One flag per feature; an unsupported call fails with `unsupported`. Behavior flags say how a feature works: `rewind_changes_session_id`, `background_turns`, `tool_output_stream`, `plan_stream`, `requests_from_subagents`, `steer_interrupts_tools`. |
+| Transcript | bindings only | Folds events into the list of transcript items a UI renders: streamed text, reasoning and tool output assembled, removals and resets applied, grouped by turn; `load` starts it from `readHistory` items, so a reloaded thread has the same shape as a live one. |
+
+### Events in the bindings
+
+- **Streams.** Each turn has its own stream (`turn.events()`). The session-wide stream (`events()`) keeps events
+  only from its first call on, so a program that never reads it holds no backlog; it starts with the session's
+  `session_started`. `subscribe(listener)` delivers every event to a callback in order and returns a way to stop.
+- **Handled requests.** A request answered by a callback is still delivered, marked handled: TypeScript `ev.handled`,
+  Go `sess.Handled(ev)`, Rust `ev.handled()`.
+- **Transcript.** `Transcript` (Go `agent.Transcript`, Rust `Transcript`, TypeScript `Transcript`) folds events with
+  `apply`, returns `items`, `item(id)`, and items grouped by turn (`byTurn` / `ByTurn` / `by_turn`), and starts from
+  stored history with `load(readHistory(...))`.
+- **Session info.** TypeScript `session.info` is the latest known `SessionInfo`; `fetchInfo()` asks the library. Go
+  `Info()` and `FetchInfo()` work the same way.
+- **Rust request helpers.** Rust streams yield `SessionEvent`, which derefs to `Event` and carries its session, so
+  `ev.allow()`, `ev.complete(result)`, or `ev.reply(result)` need no session argument.
 
 ### Sending while a turn runs
 
@@ -115,6 +132,17 @@ afterwards; `interruptTurn` stops or drops one turn.
 `send` returns the turn's ID before the harness sees the input. Every event of the turn and its `TurnResult` carry that
 ID, even when the harness gives the turn its own ID (that one is in `TurnResult.native_turn_id`). A turn that never
 runs, because it was cancelled or the session closed, still ends with a failed `turn_completed`.
+`turn_started` carries `native_turn_id`, `origin` (set when the harness started the turn itself, such as after a
+background task finished), and the input's `client_id`. Store `native_turn_id` when you need to rewind or fork at a
+turn after the session restarts.
+
+### Session IDs
+
+The native session ID (the value for `Config.resume_id`) can change while a session runs: a Claude conversation reset,
+a Pi rewind, which forks into a new session file, or a resume that continues under another ID. Each change emits
+`session_id_changed` with `previous_id`, `id`, and `reason` (`reset`, `rewind`, `resume`).
+`rewind` returns a `RewindResult`: the session ID afterwards, whether it `forked`, and the removed item IDs when the
+harness reports them.
 
 ### Errors
 
@@ -125,7 +153,8 @@ details as an `ErrorInfo` (`Diagnostics.of(&diag, err)`): `kind`, `message`, the
 details travel with the call, so they are right with any `std.Io` implementation, including ones that move tasks
 between threads. The bindings raise
 one error type carrying the same `ErrorInfo`. A turn that ran but failed or was interrupted is not an error: its
-`TurnResult.status` says so and `TurnResult.error` has the details.
+`TurnResult.status` says so and `TurnResult.error` has the details, and the session stays usable; a session that
+ends emits `session/closed` instead.
 
 `Config` fields a harness cannot honor are listed in a `notice` with code `config_ignored` right after
 `session_started`; set `Config.strict` to make `start` fail instead. A restriction a harness cannot enforce, such as
@@ -146,22 +175,40 @@ one error type carrying the same `ErrorInfo`. A turn that ran but failed or was 
 | Output schema (session / per turn) | session-wide only | ✓ both | ✓ both, emulated with a schema-validated tool |
 | Cost reporting | ✓ | – (tokens only) | ✓ |
 | Resume / fork / fork at turn | ✓ | ✓ | ✓ |
-| Rewind | ✓ native `rewind_conversation` | ✓ `thread/revert` (fork for legacy threads) | ✓ in place via the bridge |
+| Rewind | ✓ native `rewind_conversation` | ✓ `thread/revert`; legacy threads fail with `unsupported` | ✓ forks into a new session file (new ID) |
 | List models / sessions / history, delete sessions | ✓ | ✓ | ✓ |
 | Subagents | ✓ tasks + nested items | ✓ child threads as tasks + nested items | ✓ from the `subagent` tool or a subagent extension |
 | Plan / todo list | ✓ | ✓ plus `plan_delta` | ✓ with a todo extension |
 | Rate limits / hooks / goals | ✓ / ✓ / ✓ | ✓ / ✓ / ✓ | – |
 | Set title / compact / stop task | ✓ / ✓ / ✓ | ✓ / ✓ (no instructions) / ✓ (subagent threads) | ✓ / ✓ / – |
-| Check (install, version, auth) | ✓ | ✓ | ✓ (auth = has a usable model) |
+| Check (install, version, auth) | ✓ | ✓ | ✓ (auth = has a usable model; Pi 0.99.0 or newer) |
+| Dialogs (`dialog_request`) | ✓ kinds declared in `supported_dialog_kinds` | – | – |
+| Unknown native requests (`native_request`) | – | ✓ every app-server request without a typed form | – |
+| Calls without a session (`Provider.call`) | – | ✓ `account/read`, `skills/list`, `config/read`, ... | – |
+| Launch wrapper (`Config.command_prefix`) | ✓ | ✓ (`Options.command_prefix` for the shared server) | ✓ |
+| Context window before the first turn | ✓ `get_context_usage` | only a configured `model_context_window` | ✓ from the model list |
 
 `Capabilities` reports these at run time; a session's can be narrower than its provider's (such as Pi without its
 bridge extension).
+
+Provider notes:
+
+- **Claude fork** writes the fork's transcript right away, as the Claude Agent SDK's `forkSession` does, so a fork
+  closed before its first turn can still be read and resumed.
+- **Codex close** only unsubscribes from the thread: a running turn is not interrupted, and pending requests are
+  withdrawn without an answer. Turns ask for `summary: "detailed"` reasoning unless `reasoning_summary` is set.
+- **Pi** needs 0.99.0 or newer, the first version with `pi.registerMcpServer`; `check` reports an older Pi as
+  unsupported and `start` refuses it.
 
 ## Every native feature, too
 
 - **`session.call(method, params)`** sends any native request and returns the answer: a Claude control request
   subtype (`get_context_usage`, `mcp_status`, ...), a Codex app-server method (`thread/read`, `review/start`, ...),
   or a Pi RPC command (`get_session_stats`, `bash`, ...), including ones added after this library was released.
+- **`provider.call(method, params)`** does the same without a session: Codex app-server methods such as
+  `account/read` or `account/rateLimits/read`, on the shared app-server or a short-lived one.
+- **Native requests.** A Codex app-server request without a typed form arrives as a `native_request` with its method
+  and params; answer it with a result or an error. Unanswered, it waits like any request until the session closes.
 - **Native events.** Native messages without a uniform meaning arrive as `native` events named
   `<provider>/<name>`, such as `codex/diff_updated` or `pi/queue_updated`. With `Config.include_raw`, every event keeps
   the native message in `raw`; `Config.wire_tap` emits every protocol line as a `wire` event.
@@ -182,8 +229,8 @@ every message; the bindings' `protocol` and `methods` files are generated from t
 Clients name new sessions (`handle` in `session/start` and `session/fork`) and turns (`turn_id` in `session/send`)
 themselves, so they can route events that arrive before the reply; the bindings do this.
 
-- Requests: `initialize`, `provider/{check,listModels,listSessions,readHistory,deleteSession,listSubagents}`,
-  `session/{start,fork,send,wait,info,interrupt,interruptTurn,setModel,setEffort,setPermissionMode,setTitle,compact,rewind,stopTask,rateLimits,pendingRequests,call,close}`,
+- Requests: `initialize`, `provider/{check,listModels,listSessions,readHistory,deleteSession,listSubagents,call}`,
+  `session/{start,fork,send,wait,info,state,interrupt,interruptTurn,setModel,setEffort,setPermissionMode,setTitle,compact,rewind,stopTask,rateLimits,pendingRequests,call,close}`,
   `request/respond`.
 - Notifications: `session/event` (`{session, event}`), `session/closed` (`{session, error}`), `tool/cancel`
   (`{session, call_id}`: the turn running that tool call was interrupted or the session closed; the library no longer
@@ -191,9 +238,10 @@ themselves, so they can route events that arrive before the reply; the bindings 
 - Requests from the library: `tool/call` (`{session, call}`, answered with a `ToolResult`).
 - Wire format: snake_case fields; empty strings, empty lists, `false`, and null are left out; unions carry `"type"`;
   times are Unix milliseconds; binary data is base64. Failures are JSON-RPC errors whose `data` is an `ErrorInfo`.
-- Requests that change a session run in the order they arrived; `session/wait`, `session/info`,
-  `session/pendingRequests`, `session/interrupt`, `session/interruptTurn`, `session/close`, and `request/respond`
-  run at once.
+- Requests that change a session run in the order they arrived; `session/wait`, `session/info`, `session/state`,
+  `session/pendingRequests`, `session/interrupt`, `session/interruptTurn`, `session/call`, `session/close`, and
+  `request/respond` run at once, so a native call never waits behind a compaction.
+- A harness output line over 256 MiB is dropped with a warning, so one runaway message cannot exhaust memory.
 
 ## Examples
 
@@ -224,7 +272,9 @@ header.
 
 The `fake` provider (`agent.fake`, or `{"providers": {"fake": {}}}` in `initialize`) is a scripted in-process harness
 for testing code that uses this library, with no CLI or model: it streams the prompt back, asks for permission when the
-prompt contains "permission", and calls host tool `<name>` for "tool:<name>".
+prompt contains "permission", sends a `dialog_request` or `native_request` for "dialog" or "native", runs a
+background task for "task", and calls host tool `<name>` for "tool:<name>". Its compaction waits for the session
+call `finish_compaction`, and the session call `echo` returns its params.
 
 ```sh
 zig build test --summary all                    # library and providers, against scripted fake harnesses

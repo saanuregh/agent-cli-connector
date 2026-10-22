@@ -1,6 +1,6 @@
 //! Persisted sessions: the transcripts Claude Code writes under
 //! <config dir>/projects/<project>/<session>.jsonl, read for session
-//! listing, history, rewind, and fork points.
+//! listing, history, rewind, and fork points, and copied by fork.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -12,6 +12,7 @@ const RawJson = agent.json.RawJson;
 const Diagnostics = agent.Diagnostics;
 const kit = agent.providerkit;
 const eql = kit.eql;
+const Value = std.json.Value;
 const firstOf = kit.firstOf;
 const parseTimeMs = kit.parseTimeMs;
 
@@ -686,6 +687,1174 @@ fn planText(a: Allocator, steps: []const types.PlanStep) Allocator.Error![]const
     return b.items;
 }
 
+// ---------------------------------------------------------------- fork
+
+/// What `forkTranscript` copies.
+pub const ForkOptions = struct {
+    /// Keeps the conversation only up to and including this message UUID.
+    up_to_message_id: []const u8 = "",
+    /// The fork's title; empty means "<parent title> (fork)".
+    title: []const u8 = "",
+    /// The fork's session ID; empty means a new random one.
+    session_id: []const u8 = "",
+};
+
+/// Copies a persisted session into a new one next to it and returns the new
+/// session ID, so the fork exists on disk before any turn runs. A port of
+/// the Agent SDK's forkSession (version `options.protocol_version`): the
+/// main conversation is copied with a new UUID per message, parentUuid
+/// links that skip progress entries, `forkedFrom` naming the original
+/// message, and the parent's content replacements, atis latch, relocation,
+/// and history suppression; the title is the parent's with " (fork)"
+/// appended.
+pub fn forkTranscript(provider: *Provider, a: Allocator, cfg: types.Config, parent_id: []const u8, options: ForkOptions, diag: ?*Diagnostics) errors.Error![]const u8 {
+    const io = provider.env.io;
+    if (options.session_id.len > 0 and !kit.isUuid(options.session_id)) return errors.fail(diag, .invalid_params, "claude: session_id must be a UUID", .{});
+    const path = try findTranscript(provider, a, cfg, parent_id, cfg.cwd, diag);
+    const data = Io.Dir.cwd().readFileAlloc(io, path, a, .limited(max_transcript_bytes)) catch |e|
+        return errors.fail(diag, .internal, "claude: read transcript {s}: {t}", .{ path, e });
+    if (data.len == 0) return errors.fail(diag, .session_not_found, "claude: session {s} not found", .{parent_id});
+    const project_dir = std.fs.path.dirname(path) orelse ".";
+    const sidecar = try sidecarTitle(io, a, project_dir, parent_id);
+    const now = try isoTime(a, provider.env.nowMs());
+    const fork = forkEntries(a, provider.env, data, parent_id, options, sidecar, now) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NoMessages => return errors.fail(diag, .invalid_params, "claude: session {s} has no messages to fork", .{parent_id}),
+        error.MessageNotFound => return errors.fail(diag, .not_found, "claude: message {s} not found in session {s}", .{ options.up_to_message_id, parent_id }),
+    };
+    const name = try std.fmt.allocPrint(a, "{s}" ++ transcript_suffix, .{fork.session_id});
+    writeNewFile(io, project_dir, name, fork.bytes) catch |e|
+        return errors.fail(diag, .internal, "claude: write fork {s}: {t}", .{ name, e });
+    return fork.session_id;
+}
+
+/// Writes a file that must not exist yet, all at once: readers never see a
+/// partial transcript. Only the owner can read it, as the CLI's own
+/// transcripts.
+fn writeNewFile(io: Io, dir_path: []const u8, name: []const u8, bytes: []const u8) !void {
+    var dir = try Io.Dir.cwd().openDir(io, dir_path, .{});
+    defer dir.close(io);
+    const permissions: Io.File.Permissions = if (@hasDecl(Io.File.Permissions, "fromMode")) .fromMode(0o600) else .default_file;
+    var file = try dir.createFileAtomic(io, name, .{ .permissions = permissions });
+    defer file.deinit(io);
+    try file.file.writeStreamingAll(io, bytes);
+    try file.file.sync(io);
+    try file.link(io);
+}
+
+/// The title the CLI keeps in <project>/<session>/custom-title.json, cleaned
+/// as the SDK does; null when there is none.
+fn sidecarTitle(io: Io, a: Allocator, project_dir: []const u8, session_id: []const u8) Allocator.Error!?[]const u8 {
+    const path = try std.fs.path.join(a, &.{ project_dir, session_id, "custom-title.json" });
+    const data = Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)) catch return null;
+    const value = std.json.parseFromSliceLeaky(Value, a, data, .{}) catch return null;
+    if (value != .object) return null;
+    const title = value.object.get("customTitle") orelse return null;
+    if (title != .string) return null;
+    const cleaned = try cleanTitle(a, title.string);
+    return if (cleaned.len == 0) null else cleaned;
+}
+
+/// Control and format characters become spaces, C1 controls go, and the
+/// title is cut to 200 characters (the SDK's title sanitizer).
+fn cleanTitle(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
+    var spaced: std.ArrayList(u8) = .empty;
+    var in_run = false;
+    var it = (std.unicode.Utf8View.init(jsTrim(text)) catch return jsTrim(text)).iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (isControlOrFormat(cp)) {
+            if (!in_run) try spaced.append(a, ' ');
+            in_run = true;
+            continue;
+        }
+        in_run = false;
+        var buf: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(cp, &buf) catch continue;
+        try spaced.appendSlice(a, buf[0..n]);
+    }
+    return jsTrim(kit.truncateChars(spaced.items, 200));
+}
+
+/// Unicode categories Cc and Cf, and the line and paragraph separators.
+fn isControlOrFormat(cp: u21) bool {
+    return cp <= 0x1f or (cp >= 0x7f and cp <= 0x9f) or cp == 0xad or (cp >= 0x600 and cp <= 0x605) or cp == 0x61c or
+        cp == 0x6dd or cp == 0x70f or cp == 0x180e or (cp >= 0x200b and cp <= 0x200f) or (cp >= 0x2028 and cp <= 0x202e) or
+        (cp >= 0x2060 and cp <= 0x2064) or (cp >= 0x2066 and cp <= 0x206f) or cp == 0xfeff or (cp >= 0xfff9 and cp <= 0xfffb);
+}
+
+/// `text` without the leading and trailing white space JavaScript's trim
+/// removes.
+fn jsTrim(text: []const u8) []const u8 {
+    var start: usize = 0;
+    var end: usize = text.len;
+    while (start < end) {
+        const n = std.unicode.utf8ByteSequenceLength(text[start]) catch break;
+        if (start + n > end) break;
+        const cp = std.unicode.utf8Decode(text[start .. start + n]) catch break;
+        if (!isJsSpace(cp)) break;
+        start += n;
+    }
+    while (end > start) {
+        var begin = end - 1;
+        while (begin > start and text[begin] & 0xC0 == 0x80) begin -= 1;
+        const cp = std.unicode.utf8Decode(text[begin..end]) catch break;
+        if (!isJsSpace(cp)) break;
+        end = begin;
+    }
+    return text[start..end];
+}
+
+fn isJsSpace(cp: u21) bool {
+    return switch (cp) {
+        '\t', '\n', 0x0b, 0x0c, '\r', ' ', 0xa0, 0x1680, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff => true,
+        else => cp >= 0x2000 and cp <= 0x200a,
+    };
+}
+
+/// `ms` as an ISO 8601 UTC time with milliseconds, as JavaScript's
+/// toISOString writes it.
+fn isoTime(a: Allocator, ms: i64) Allocator.Error![]const u8 {
+    const seconds: u64 = @intCast(@max(@divFloor(ms, 1000), 0));
+    const epoch: std.time.epoch.EpochSeconds = .{ .secs = seconds };
+    const year_day = epoch.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_seconds = epoch.getDaySeconds();
+    return std.fmt.allocPrint(a, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+        year_day.year,                      month_day.month.numeric(),        month_day.day_index + 1,
+        day_seconds.getHoursIntoDay(),      day_seconds.getMinutesIntoHour(), day_seconds.getSecondsIntoMinute(),
+        @as(u64, @intCast(@mod(ms, 1000))),
+    });
+}
+
+/// The fields the SDK resets on every forked message: isSidechain becomes
+/// false and these go.
+const fork_reset_fields = [_][]const u8{ "teamName", "agentName", "sessionKind", "slug", "sourceToolAssistantUUID", "summarizedTurnPromptUuids", "droppedPromptUuids" };
+
+/// A transcript record of the main conversation kinds. Reads follow
+/// JavaScript: null from `get` is an absent field.
+const Record = struct {
+    object: *const std.json.ObjectMap,
+    uuid: []const u8,
+    /// Reads as the SDK's copy with the fork reset fields applied.
+    reset: bool = false,
+
+    fn get(record: *const Record, key: []const u8) ?Value {
+        if (record.reset) {
+            if (eql(key, "isSidechain")) return .{ .bool = false };
+            if (kit.contains(&fork_reset_fields, key)) return null;
+        }
+        return record.object.get(key);
+    }
+
+    fn str(record: *const Record, key: []const u8) []const u8 {
+        const value = record.get(key) orelse return "";
+        return if (value == .string) value.string else "";
+    }
+
+    fn isType(record: *const Record, record_type: []const u8) bool {
+        return eql(record.str("type"), record_type);
+    }
+
+    fn isMessage(record: *const Record) bool {
+        return record.isType("user") or record.isType("assistant");
+    }
+
+    /// The source_uuid of a queued_command attachment.
+    fn sourceUuid(record: *const Record) []const u8 {
+        if (!record.isType("attachment")) return "";
+        const attachment = record.get("attachment") orelse return "";
+        if (attachment != .object or !eql(stringOf(attachment.object.get("type")), "queued_command")) return "";
+        return stringOf(attachment.object.get("source_uuid"));
+    }
+
+    /// The API message ID of an assistant record.
+    fn messageId(record: *const Record) []const u8 {
+        if (!record.isType("assistant")) return "";
+        return stringOf(member(record.get("message"), "id"));
+    }
+
+    /// The `field` strings of the message content blocks of `block_type`.
+    fn blockIds(record: *const Record, a: Allocator, block_type: []const u8, field: []const u8) Allocator.Error![]const []const u8 {
+        const content = member(record.get("message"), "content") orelse return &.{};
+        if (content != .array) return &.{};
+        var out: std.ArrayList([]const u8) = .empty;
+        for (content.array.items) |block| {
+            if (block != .object or !eql(stringOf(block.object.get("type")), block_type)) continue;
+            const id = block.object.get(field) orelse continue;
+            if (id == .string) try out.append(a, id.string);
+        }
+        return out.items;
+    }
+
+    /// A user record answering tool calls.
+    fn isToolResult(record: *const Record, parent: ?Value) bool {
+        if (!record.isType("user") or !truthy(parent)) return false;
+        const content = member(record.get("message"), "content") orelse return false;
+        if (content != .array) return false;
+        for (content.array.items) |block| if (block == .object and eql(stringOf(block.object.get("type")), "tool_result")) return true;
+        return false;
+    }
+};
+
+fn member(value: ?Value, key: []const u8) ?Value {
+    const v = value orelse return null;
+    return if (v == .object) v.object.get(key) else null;
+}
+
+fn stringOf(value: ?Value) []const u8 {
+    const v = value orelse return "";
+    return if (v == .string) v.string else "";
+}
+
+/// A non-empty string value, the only kind of link the SDK follows.
+fn nonEmptyString(value: ?Value) ?[]const u8 {
+    const v = value orelse return null;
+    return if (v == .string and v.string.len > 0) v.string else null;
+}
+
+/// JavaScript truthiness of a JSON value; null is an absent field.
+fn truthy(value: ?Value) bool {
+    const v = value orelse return false;
+    return switch (v) {
+        .null => false,
+        .bool => |b| b,
+        .integer => |n| n != 0,
+        .float => |f| f != 0 and !std.math.isNan(f),
+        .number_string => |s| (std.fmt.parseFloat(f64, s) catch 1) != 0,
+        .string => |s| s.len > 0,
+        .array, .object => true,
+    };
+}
+
+/// JavaScript `===` for JSON values; null is an absent field. Objects and
+/// arrays are never equal, as distinct parsed values.
+fn jsStrictEqual(x: ?Value, y: ?Value) bool {
+    const left = x orelse return y == null;
+    const right = y orelse return false;
+    return switch (left) {
+        .null => right == .null,
+        .bool => |b| right == .bool and right.bool == b,
+        .string => |s| right == .string and eql(right.string, s),
+        .number_string => |s| right == .number_string and eql(right.number_string, s),
+        .integer => |n| right == .integer and right.integer == n,
+        .float => |f| right == .float and right.float == f,
+        .array, .object => false,
+    };
+}
+
+const ForkError = error{ OutOfMemory, NoMessages, MessageNotFound };
+
+/// A forked transcript: its session ID and its lines.
+const Fork = struct { session_id: []const u8, bytes: []const u8 };
+
+/// What the SDK reads from a transcript to fork it.
+const Parsed = struct {
+    records: []const Record,
+    content_replacements: std.json.Array,
+    relocated_cwd: []const u8 = "",
+    history_suppressed: bool = false,
+    atis_latch: ?[]const u8 = null,
+};
+
+/// The record types forkSession copies.
+const transcript_record_types = [_][]const u8{ "user", "assistant", "attachment", "system", "progress" };
+
+fn parseTranscript(a: Allocator, data: []const u8, parent_id: []const u8) Allocator.Error!Parsed {
+    var records: std.ArrayList(Record) = .empty;
+    var parsed: Parsed = .{ .records = &.{}, .content_replacements = .init(a) };
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |raw_line| {
+        var start: usize = 0;
+        while (start < raw_line.len and raw_line[start] <= 32) start += 1;
+        if (start == raw_line.len) continue;
+        const value = std.json.parseFromSliceLeaky(Value, a, raw_line[start..], .{ .parse_numbers = false, .allocate = .alloc_always, .duplicate_field_behavior = .use_last }) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => continue,
+        };
+        if (value != .object) continue;
+        const object = try a.create(std.json.ObjectMap);
+        object.* = value.object;
+        const record_type = stringOf(object.get("type"));
+        const ours = eql(stringOf(object.get("sessionId")), parent_id);
+        if (kit.contains(&transcript_record_types, record_type)) {
+            const uuid = object.get("uuid") orelse continue;
+            if (uuid == .string) try records.append(a, .{ .object = object, .uuid = uuid.string });
+        } else if (eql(record_type, "history-suppression")) {
+            parsed.history_suppressed = true;
+        } else if (eql(record_type, "atis-latch") and ours) {
+            const atis = object.get("atis") orelse continue;
+            if (atis == .string and printableAscii(atis.string)) parsed.atis_latch = atis.string;
+        } else if (eql(record_type, "content-replacement") and ours) {
+            const replacements = object.get("replacements") orelse continue;
+            if (replacements == .array) try parsed.content_replacements.appendSlice(replacements.array.items);
+        } else if (eql(record_type, "relocated") and ours) {
+            const cwd = stringOf(object.get("relocatedCwd"));
+            if (cwd.len > 0) parsed.relocated_cwd = cwd;
+        }
+    }
+    parsed.records = records.items;
+    return parsed;
+}
+
+fn printableAscii(s: []const u8) bool {
+    for (s) |c| if (c < 0x21 or c > 0x7e) return false;
+    return true;
+}
+
+/// Forks the transcript `data` of session `parent_id`; `now` is the ISO time
+/// stamped on the last message and the added records.
+fn forkEntries(a: Allocator, env: agent.Env, data: []const u8, parent_id: []const u8, options: ForkOptions, sidecar_title: ?[]const u8, now: []const u8) ForkError!Fork {
+    const parsed = try parseTranscript(a, data, parent_id);
+    var main: std.ArrayList(*const Record) = .empty;
+    for (parsed.records) |*record| if (!truthy(record.get("isSidechain"))) try main.append(a, record);
+    if (main.items.len == 0) return error.NoMessages;
+    var kept: []const *const Record = main.items;
+    if (options.up_to_message_id.len > 0) kept = try sliceUpTo(a, env, kept, options.up_to_message_id);
+
+    var new_ids: std.StringHashMapUnmanaged([]const u8) = .empty;
+    for (kept) |record| try new_ids.put(a, record.uuid, try newUuid(a, env));
+    var messages: std.ArrayList(*const Record) = .empty;
+    for (kept) |record| if (!record.isType("progress")) try messages.append(a, record);
+    if (messages.items.len == 0) return error.NoMessages;
+    var message_ids: std.StringHashMapUnmanaged([]const u8) = .empty;
+    for (messages.items) |record| try message_ids.put(a, record.uuid, new_ids.get(record.uuid).?);
+    var by_uuid: std.StringHashMapUnmanaged(*const Record) = .empty;
+    for (kept) |record| try by_uuid.put(a, record.uuid, record);
+
+    const session_id = if (options.session_id.len > 0) options.session_id else try newUuid(a, env);
+    var out: std.ArrayList(u8) = .empty;
+    if (parsed.history_suppressed) {
+        var entry: std.json.ObjectMap = .empty;
+        try entry.put(a, "type", .{ .string = "history-suppression" });
+        try entry.put(a, "sessionId", .{ .string = session_id });
+        try entry.put(a, "cause", .{ .string = "fork_inherit" });
+        try entry.put(a, "ts", .{ .string = now });
+        try writeLine(a, &out, .{ .object = entry });
+    }
+    for (messages.items, 0..) |record, n| {
+        // The parent is the nearest ancestor that is not a progress entry.
+        var parent: ?[]const u8 = null;
+        var next = nonEmptyString(record.get("parentUuid"));
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        while (next) |id| {
+            const ancestor = by_uuid.get(id) orelse break;
+            if (!ancestor.isType("progress")) {
+                parent = new_ids.get(id);
+                break;
+            }
+            if (seen.contains(ancestor.uuid)) {
+                parent = new_ids.get(ancestor.uuid);
+                break;
+            }
+            try seen.put(a, ancestor.uuid, {});
+            next = nonEmptyString(ancestor.get("parentUuid"));
+        }
+        var entry = try record.object.clone(a);
+        if (record.isType("system") and eql(record.str("subtype"), "model_refusal_fallback")) try entry.put(a, "neutralizedByFork", .{ .bool = true });
+        if (try deferredToolsRecord(a, record, &new_ids)) |attachment| try entry.put(a, "attachment", attachment);
+        if (try remappedCompactMetadata(a, record, &message_ids)) |metadata| try entry.put(a, "compactMetadata", metadata);
+        const source_uuid = record.sourceUuid();
+        if (if (source_uuid.len > 0) new_ids.get(source_uuid) else null) |source| {
+            var attachment = try record.get("attachment").?.object.clone(a);
+            try attachment.put(a, "source_uuid", .{ .string = source });
+            try entry.put(a, "attachment", .{ .object = attachment });
+        }
+        try entry.put(a, "uuid", .{ .string = new_ids.get(record.uuid).? });
+        try entry.put(a, "parentUuid", if (parent) |p| .{ .string = p } else .null);
+        if (record.get("logicalParentUuid")) |logical| {
+            const mapped: ?[]const u8 = if (logical == .string) new_ids.get(logical.string) else null;
+            try entry.put(a, "logicalParentUuid", if (logical == .null) .null else if (mapped) |m| .{ .string = m } else .null);
+        }
+        try entry.put(a, "sessionId", .{ .string = session_id });
+        if (n == messages.items.len - 1) {
+            try entry.put(a, "timestamp", .{ .string = now });
+        }
+        try entry.put(a, "isSidechain", .{ .bool = false });
+        for (fork_reset_fields) |field| _ = entry.orderedRemove(field);
+        var forked_from: std.json.ObjectMap = .empty;
+        try forked_from.put(a, "sessionId", .{ .string = parent_id });
+        try forked_from.put(a, "messageUuid", .{ .string = record.uuid });
+        try entry.put(a, "forkedFrom", .{ .object = forked_from });
+        try writeLine(a, &out, .{ .object = entry });
+    }
+    if (parsed.content_replacements.items.len > 0) {
+        var entry: std.json.ObjectMap = .empty;
+        try entry.put(a, "type", .{ .string = "content-replacement" });
+        try entry.put(a, "sessionId", .{ .string = session_id });
+        try entry.put(a, "replacements", .{ .array = parsed.content_replacements });
+        try entry.put(a, "uuid", .{ .string = try newUuid(a, env) });
+        try entry.put(a, "timestamp", .{ .string = now });
+        try writeLine(a, &out, .{ .object = entry });
+    }
+    if (parsed.atis_latch) |atis| {
+        var entry: std.json.ObjectMap = .empty;
+        try entry.put(a, "type", .{ .string = "atis-latch" });
+        try entry.put(a, "sessionId", .{ .string = session_id });
+        try entry.put(a, "atis", .{ .string = atis });
+        try writeLine(a, &out, .{ .object = entry });
+    }
+    if (parsed.relocated_cwd.len > 0) {
+        var entry: std.json.ObjectMap = .empty;
+        try entry.put(a, "type", .{ .string = "relocated" });
+        try entry.put(a, "sessionId", .{ .string = session_id });
+        try entry.put(a, "relocatedCwd", .{ .string = parsed.relocated_cwd });
+        try writeLine(a, &out, .{ .object = entry });
+    }
+    var title = jsTrim(options.title);
+    if (title.len == 0) {
+        const parent_title = try transcriptTitle(a, data, sidecar_title);
+        title = try std.fmt.allocPrint(a, "{s} (fork)", .{if (parent_title.len > 0) parent_title else "Forked session"});
+    }
+    var entry: std.json.ObjectMap = .empty;
+    try entry.put(a, "type", .{ .string = "custom-title" });
+    try entry.put(a, "sessionId", .{ .string = session_id });
+    try entry.put(a, "customTitle", .{ .string = title });
+    try entry.put(a, "uuid", .{ .string = try newUuid(a, env) });
+    try entry.put(a, "timestamp", .{ .string = now });
+    try writeLine(a, &out, .{ .object = entry });
+    return .{ .session_id = session_id, .bytes = out.items };
+}
+
+fn newUuid(a: Allocator, env: agent.Env) Allocator.Error![]const u8 {
+    const id = env.uuid();
+    return a.dupe(u8, id.slice());
+}
+
+/// A deferred_tools_record attachment whose name-only announcements name
+/// forked messages, with the announcements of dropped messages left out.
+fn deferredToolsRecord(a: Allocator, record: *const Record, new_ids: *const std.StringHashMapUnmanaged([]const u8)) Allocator.Error!?Value {
+    if (!record.isType("attachment")) return null;
+    const attachment = record.get("attachment") orelse return null;
+    if (attachment != .object or !eql(stringOf(attachment.object.get("type")), "deferred_tools_record")) return null;
+    const announcements = attachment.object.get("nameOnlyAnnouncements") orelse return null;
+    if (announcements != .array) return null;
+    var mapped: std.json.Array = .init(a);
+    for (announcements.array.items) |announcement| {
+        if (announcement != .string) continue;
+        if (new_ids.get(announcement.string)) |id| try mapped.append(.{ .string = id });
+    }
+    var copy = try attachment.object.clone(a);
+    try copy.put(a, "nameOnlyAnnouncements", .{ .array = mapped });
+    return .{ .object = copy };
+}
+
+/// A compact boundary's metadata with its preserved message and segment
+/// UUIDs naming the forked messages; null when it names none.
+fn remappedCompactMetadata(a: Allocator, record: *const Record, message_ids: *const std.StringHashMapUnmanaged([]const u8)) Allocator.Error!?Value {
+    if (!record.isType("system")) return null;
+    const metadata = record.get("compactMetadata") orelse return null;
+    if (metadata != .object) return null;
+    const preserved_messages = metadata.object.get("preservedMessages");
+    const preserved_segment = metadata.object.get("preservedSegment");
+    if (preserved_messages == null and preserved_segment == null and metadata.object.get("runningTurnSends") == null) return null;
+    var out: std.json.ObjectMap = .empty;
+    for (metadata.object.keys(), metadata.object.values()) |key, value| {
+        if (eql(key, "preservedMessages") or eql(key, "preservedSegment") or eql(key, "runningTurnSends")) continue;
+        try out.put(a, key, value);
+    }
+    if (preserved_messages) |value| try out.put(a, "preservedMessages", try remapFields(a, value, &.{ "anchorUuid", "uuids", "allUuids" }, message_ids));
+    if (preserved_segment) |value| try out.put(a, "preservedSegment", try remapFields(a, value, &.{ "headUuid", "anchorUuid", "tailUuid" }, message_ids));
+    return .{ .object = out };
+}
+
+/// `value` with each of `fields` (a UUID or a list of them) mapped to the
+/// forked UUIDs; UUIDs not forked stay.
+fn remapFields(a: Allocator, value: Value, fields: []const []const u8, ids: *const std.StringHashMapUnmanaged([]const u8)) Allocator.Error!Value {
+    if (value != .object) return value;
+    var copy = try value.object.clone(a);
+    for (fields) |field| {
+        const ptr = copy.getPtr(field) orelse continue;
+        if (ptr.* == .array) {
+            var list: std.json.Array = .init(a);
+            for (ptr.array.items) |item| try list.append(remapUuid(item, ids));
+            ptr.* = .{ .array = list };
+        } else ptr.* = remapUuid(ptr.*, ids);
+    }
+    return .{ .object = copy };
+}
+
+fn remapUuid(value: Value, ids: *const std.StringHashMapUnmanaged([]const u8)) Value {
+    if (value != .string) return value;
+    return .{ .string = ids.get(value.string) orelse value.string };
+}
+
+/// The records up to message `up_to` (a UUID, or the source UUID of a
+/// queued command), found on the conversation chain first, with compacted
+/// segments the cut leaves behind dropped.
+fn sliceUpTo(a: Allocator, env: agent.Env, records: []const *const Record, up_to: []const u8) ForkError![]const *const Record {
+    const chain = try conversationChain(a, records, null);
+    var first_index: std.StringHashMapUnmanaged(usize) = .empty;
+    for (records, 0..) |record, i| {
+        const gop = try first_index.getOrPut(a, record.uuid);
+        if (!gop.found_existing) gop.value_ptr.* = i;
+    }
+    var chain_end: isize = -1;
+    for (chain) |record| if (first_index.get(record.uuid)) |i| {
+        chain_end = @max(chain_end, @as(isize, @intCast(i)));
+    };
+    var candidates: std.ArrayList(*const Record) = .empty;
+    try candidates.appendSlice(a, chain);
+    try candidates.appendSlice(a, records[@intCast(chain_end + 1)..]);
+    const end: usize = if (findMessage(candidates.items, up_to)) |k|
+        first_index.get(candidates.items[k].uuid) orelse return error.MessageNotFound
+    else
+        findMessage(records, up_to) orelse return error.MessageNotFound;
+    return dropCompactedSegments(a, env, records[0 .. end + 1]);
+}
+
+fn findMessage(records: []const *const Record, id: []const u8) ?usize {
+    for (records, 0..) |record, i| if (eql(record.uuid, id)) return i;
+    for (records, 0..) |record, i| if (eql(record.sourceUuid(), id)) return i;
+    return null;
+}
+
+/// The SDK's cut repair: compact boundaries (and the segments under them)
+/// that the cut conversation no longer reaches are left out, until the
+/// conversation chain of the slice is what it was with the cut.
+fn dropCompactedSegments(a: Allocator, env: agent.Env, slice: []const *const Record) Allocator.Error![]const *const Record {
+    if (slice.len == 0) return slice;
+    const last = slice[slice.len - 1];
+    const reset = try a.alloc(*const Record, slice.len);
+    for (slice, reset) |record, *copy| {
+        const r = try a.create(Record);
+        r.* = record.*;
+        r.reset = true;
+        copy.* = r;
+    }
+    var sentinel_object: std.json.ObjectMap = .empty;
+    const sentinel_uuid = try newUuid(a, env);
+    try sentinel_object.put(a, "type", .{ .string = "system" });
+    try sentinel_object.put(a, "uuid", .{ .string = sentinel_uuid });
+    try sentinel_object.put(a, "parentUuid", .{ .string = last.uuid });
+    if (last.get("sessionId")) |v| try sentinel_object.put(a, "sessionId", v);
+    if (last.get("timestamp")) |v| try sentinel_object.put(a, "timestamp", v);
+    const sentinel = try a.create(Record);
+    sentinel.* = .{ .object = try copyObject(a, sentinel_object), .uuid = sentinel_uuid };
+    const with_sentinel = try a.alloc(*const Record, slice.len + 1);
+    @memcpy(with_sentinel[0..slice.len], reset);
+    with_sentinel[slice.len] = sentinel;
+    const cut_chain = try conversationChain(a, with_sentinel, null);
+
+    var state: CutState = .{ .slice = slice, .left_out = .empty };
+    for (slice, 0..) |record, i| {
+        const gop = try state.index.getOrPut(a, record.uuid);
+        if (!gop.found_existing) gop.value_ptr.* = i;
+        try state.by_uuid.put(a, record.uuid, record);
+    }
+    state.start = if (cut_chain.len > 0) state.index.get(cut_chain[0].uuid) orelse return slice else return slice;
+    var cut_ids: std.StringHashMapUnmanaged(void) = .empty;
+    for (cut_chain) |record| try cut_ids.put(a, record.uuid, {});
+    var roots: std.ArrayList([]const u8) = .empty;
+    try roots.append(a, last.uuid);
+    for (cut_chain) |record| try roots.append(a, record.uuid);
+    for (roots.items) |root| {
+        var current = state.by_uuid.get(root);
+        while (current) |record| {
+            if (state.live.contains(record.uuid)) break;
+            try state.live.put(a, record.uuid, {});
+            current = if (nonEmptyString(record.get("parentUuid"))) |p| state.by_uuid.get(p) else null;
+        }
+    }
+    for (slice) |record| {
+        if (!record.isType("system") or !eql(record.str("subtype"), "compact_boundary") or !state.droppable(record)) continue;
+        if (preservesLive(record, &state.live)) continue;
+        try state.leaveOut(a, record);
+    }
+    while (true) {
+        var remaining: std.ArrayList(*const Record) = .empty;
+        for (reset) |record| if (!state.left_out.contains(record.uuid)) try remaining.append(a, record);
+        var found: Found = .{};
+        const chain = try conversationChain(a, remaining.items, &found);
+        const unchanged = chain.len == cut_ids.count() and for (chain) |record| {
+            if (!cut_ids.contains(record.uuid)) break false;
+        } else true;
+        if (unchanged) break;
+        const terminal = found.terminal orelse break;
+        if (!state.droppable(terminal)) break;
+        try state.leaveOut(a, terminal);
+    }
+    if (state.left_out.count() == 0) return slice;
+    var out: std.ArrayList(*const Record) = .empty;
+    for (slice) |record| if (!state.left_out.contains(record.uuid)) try out.append(a, record);
+    return out.items;
+}
+
+fn copyObject(a: Allocator, object: std.json.ObjectMap) Allocator.Error!*const std.json.ObjectMap {
+    const ptr = try a.create(std.json.ObjectMap);
+    ptr.* = object;
+    return ptr;
+}
+
+/// Whether a compact boundary preserves a message the cut conversation
+/// still reaches.
+fn preservesLive(record: *const Record, live: *const std.StringHashMapUnmanaged(void)) bool {
+    const metadata = record.get("compactMetadata") orelse return false;
+    if (metadata != .object) return false;
+    if (metadata.object.get("preservedMessages")) |messages| if (messages == .object) {
+        if (messages.object.get("uuids")) |uuids| if (uuids == .array) for (uuids.array.items) |id| {
+            if (id == .string and live.contains(id.string)) return true;
+        };
+    };
+    if (metadata.object.get("preservedSegment")) |segment| if (segment == .object) {
+        for ([_][]const u8{ "headUuid", "tailUuid" }) |field| {
+            const id = segment.object.get(field) orelse continue;
+            if (id == .string and live.contains(id.string)) return true;
+        }
+    };
+    return false;
+}
+
+/// The bookkeeping of `dropCompactedSegments`.
+const CutState = struct {
+    slice: []const *const Record,
+    by_uuid: std.StringHashMapUnmanaged(*const Record) = .empty,
+    /// First position of each UUID in the slice.
+    index: std.StringHashMapUnmanaged(usize) = .empty,
+    /// Messages the cut conversation reaches.
+    live: std.StringHashMapUnmanaged(void) = .empty,
+    /// Where the cut conversation starts in the slice.
+    start: usize = 0,
+    left_out: std.StringHashMapUnmanaged(void),
+
+    /// Not reached by the cut conversation and not before its start.
+    fn droppable(state: *const CutState, record: *const Record) bool {
+        return !state.live.contains(record.uuid) and (state.index.get(record.uuid) orelse state.start) >= state.start;
+    }
+
+    /// Leaves out `record`, its droppable ancestors, and every later
+    /// record hanging off one left out.
+    fn leaveOut(state: *CutState, a: Allocator, record: *const Record) Allocator.Error!void {
+        var current = state.by_uuid.get(record.uuid);
+        while (current) |r| {
+            if (!state.droppable(r) or state.left_out.contains(r.uuid)) break;
+            try state.left_out.put(a, r.uuid, {});
+            current = if (nonEmptyString(r.get("parentUuid"))) |p| state.by_uuid.get(p) else null;
+        }
+        for (state.slice) |r| {
+            if (nonEmptyString(r.get("parentUuid"))) |p| if (state.left_out.contains(p)) try state.left_out.put(a, r.uuid, {});
+        }
+    }
+};
+
+/// Where a conversation chain search ended: the leaf it started from when
+/// that leaf reached a message.
+const Found = struct { terminal: ?*const Record = null };
+
+/// One record in the chain search with its possibly relinked parent.
+const ChainNode = struct { record: *const Record, parent: ?Value };
+
+/// The SDK's conversation chain (its pd): compact boundaries relink their
+/// preserved messages, then the chain runs from the root to the latest
+/// main-conversation leaf, with the sibling records of parallel tool calls
+/// added after their assistant message.
+fn conversationChain(a: Allocator, input: []const *const Record, found: ?*Found) Allocator.Error![]const *const Record {
+    var nodes: std.StringArrayHashMapUnmanaged(ChainNode) = .empty;
+    for (input) |record| try nodes.put(a, record.uuid, .{ .record = record, .parent = record.get("parentUuid") });
+    for (0..nodes.count()) |k| {
+        const boundary = nodes.values()[k].record;
+        if (!boundary.isType("system") or !eql(boundary.str("subtype"), "compact_boundary")) continue;
+        const metadata = boundary.get("compactMetadata");
+        const messages = member(metadata, "preservedMessages");
+        const segment = member(metadata, "preservedSegment");
+        if (truthy(messages)) {
+            const uuids_value = member(messages, "uuids") orelse continue;
+            if (uuids_value != .array) continue;
+            const uuids = uuids_value.array.items;
+            if (uuids.len == 0) continue;
+            const all_present = for (uuids) |id| {
+                if (id != .string or !nodes.contains(id.string)) break false;
+            } else true;
+            if (!all_present) continue;
+            const anchor = member(messages, "anchorUuid");
+            var previous: ?Value = anchor;
+            for (uuids) |id| {
+                nodes.getPtr(id.string).?.parent = previous;
+                previous = id;
+            }
+            const head = uuids[0].string;
+            const tail = uuids[uuids.len - 1];
+            for (nodes.keys(), nodes.values()) |key, *node| {
+                if (jsStrictEqual(node.parent, anchor) and !eql(key, head)) node.parent = tail;
+            }
+        } else if (truthy(segment)) {
+            const head = member(segment, "headUuid");
+            const anchor = member(segment, "anchorUuid");
+            if (head) |h| if (h == .string) if (nodes.getPtr(h.string)) |node| {
+                node.parent = anchor;
+            };
+            for (nodes.keys(), nodes.values()) |key, *node| {
+                const is_head = if (head) |h| h == .string and eql(h.string, key) else false;
+                if (jsStrictEqual(node.parent, anchor) and !is_head) node.parent = member(segment, "tailUuid");
+            }
+        }
+    }
+    var last_index: std.StringHashMapUnmanaged(usize) = .empty;
+    for (input, 0..) |record, i| try last_index.put(a, record.uuid, i);
+    const position = struct {
+        fn of(map: *const std.StringHashMapUnmanaged(usize), record: *const Record) isize {
+            return if (map.get(record.uuid)) |i| @intCast(i) else -1;
+        }
+    }.of;
+    var has_children: std.StringHashMapUnmanaged(void) = .empty;
+    var has_main_children: std.StringHashMapUnmanaged(void) = .empty;
+    for (nodes.values()) |node| if (nonEmptyString(node.parent)) |p| {
+        try has_children.put(a, p, {});
+        if (isMainRecord(node.record)) try has_main_children.put(a, p, {});
+    };
+    var leaves: std.ArrayList(*const Record) = .empty;
+    for (nodes.values()) |node| if (isMainRecord(node.record) and !has_main_children.contains(node.record.uuid)) try leaves.append(a, node.record);
+    const Order = struct {
+        index: *const std.StringHashMapUnmanaged(usize),
+        fn later(context: @This(), x: *const Record, y: *const Record) bool {
+            return position(context.index, x) > position(context.index, y);
+        }
+    };
+    std.mem.sort(*const Record, leaves.items, Order{ .index = &last_index }, Order.later);
+
+    var visited: std.StringHashMapUnmanaged(void) = .empty;
+    var message: ?*const Record = null;
+    var terminal: ?*const Record = null;
+    search: for (leaves.items) |leaf| {
+        var path: std.ArrayList([]const u8) = .empty;
+        var on_path: std.StringHashMapUnmanaged(void) = .empty;
+        var current: ?*const Record = leaf;
+        while (current) |record| {
+            if (visited.contains(record.uuid) or on_path.contains(record.uuid)) break;
+            if (record.isMessage()) {
+                message = record;
+                terminal = leaf;
+                break :search;
+            }
+            try on_path.put(a, record.uuid, {});
+            try path.append(a, record.uuid);
+            current = parentOf(&nodes, record);
+        }
+        for (path.items) |id| try visited.put(a, id, {});
+    }
+    var chosen = message;
+    if (chosen == null) {
+        var reached: std.ArrayList(*const Record) = .empty;
+        for (nodes.values()) |node| {
+            if (has_children.contains(node.record.uuid)) continue;
+            var seen: std.StringHashMapUnmanaged(void) = .empty;
+            var current: ?*const Record = node.record;
+            while (current) |record| {
+                if (seen.contains(record.uuid)) break;
+                try seen.put(a, record.uuid, {});
+                if (record.isMessage()) {
+                    try reached.append(a, record);
+                    break;
+                }
+                current = parentOf(&nodes, record);
+            }
+        }
+        if (reached.items.len == 0) return &.{};
+        var latest_main: ?*const Record = null;
+        var latest: *const Record = reached.items[0];
+        for (reached.items) |record| {
+            if (position(&last_index, record) > position(&last_index, latest)) latest = record;
+            if (truthy(record.get("isSidechain")) or truthy(record.get("teamName")) or truthy(record.get("isMeta"))) continue;
+            if (latest_main == null or position(&last_index, record) > position(&last_index, latest_main.?)) latest_main = record;
+        }
+        chosen = latest_main orelse latest;
+    }
+    var chain: std.ArrayList(*const Record) = .empty;
+    var on_chain: std.StringHashMapUnmanaged(void) = .empty;
+    var current: ?*const Record = nodes.get(chosen.?.uuid).?.record;
+    while (current) |record| {
+        if (on_chain.contains(record.uuid)) break;
+        try on_chain.put(a, record.uuid, {});
+        try chain.append(a, record);
+        current = parentOf(&nodes, record);
+    }
+    std.mem.reverse(*const Record, chain.items);
+    if (found) |f| f.terminal = if (message != null) terminal else null;
+    return addToolSiblings(a, &nodes, chain.items, &on_chain);
+}
+
+fn parentOf(nodes: *const std.StringArrayHashMapUnmanaged(ChainNode), record: *const Record) ?*const Record {
+    const parent = nonEmptyString(nodes.get(record.uuid).?.parent) orelse return null;
+    return if (nodes.get(parent)) |node| node.record else null;
+}
+
+/// A record that can end the main conversation.
+fn isMainRecord(record: *const Record) bool {
+    if (truthy(record.get("isSidechain")) or truthy(record.get("teamName")) or record.isType("progress")) return false;
+    return !(record.isType("attachment") and eql(stringOf(member(record.get("attachment"), "type")), "fork_briefing"));
+}
+
+/// The SDK's repair of parallel tool calls (its Nwe): the other records of
+/// each assistant message on the chain, and the tool results answering
+/// them, are inserted after the message's last record on the chain.
+fn addToolSiblings(
+    a: Allocator,
+    nodes: *const std.StringArrayHashMapUnmanaged(ChainNode),
+    chain: []const *const Record,
+    on_chain: *std.StringHashMapUnmanaged(void),
+) Allocator.Error![]const *const Record {
+    var assistants: std.ArrayList(*const Record) = .empty;
+    for (chain) |record| if (record.isType("assistant")) try assistants.append(a, record);
+    if (assistants.items.len == 0) return chain;
+    var last_of_message: std.StringHashMapUnmanaged(*const Record) = .empty;
+    for (assistants.items) |record| {
+        const id = record.messageId();
+        if (id.len > 0) try last_of_message.put(a, id, record);
+    }
+    var parts: std.StringArrayHashMapUnmanaged(std.ArrayList(*const Record)) = .empty;
+    var children: std.StringHashMapUnmanaged(std.ArrayList(*const Record)) = .empty;
+    var added_child: std.StringHashMapUnmanaged(void) = .empty;
+    // The record that called each tool, or null when several messages did.
+    var callers: std.StringHashMapUnmanaged(?*const Record) = .empty;
+    var results: std.ArrayList(*const Record) = .empty;
+    for (nodes.values()) |node| {
+        const record = node.record;
+        const id = record.messageId();
+        if (id.len > 0) {
+            const gop = try parts.getOrPut(a, id);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(a, record);
+            for (try record.blockIds(a, "tool_use", "id")) |tool| {
+                const gop_caller = try callers.getOrPut(a, tool);
+                if (!gop_caller.found_existing) {
+                    gop_caller.value_ptr.* = record;
+                } else if (gop_caller.value_ptr.*) |caller| {
+                    gop_caller.value_ptr.* = if (eql(caller.messageId(), id)) record else null;
+                }
+            }
+        } else if (record.isToolResult(node.parent)) try results.append(a, record);
+    }
+    const addChild = struct {
+        fn add(arena: Allocator, map: *std.StringHashMapUnmanaged(std.ArrayList(*const Record)), dedup: *std.StringHashMapUnmanaged(void), parent: []const u8, child: *const Record) Allocator.Error!void {
+            const key = try std.fmt.allocPrint(arena, "{s}\n{s}", .{ parent, child.uuid });
+            if (dedup.contains(key)) return;
+            try dedup.put(arena, key, {});
+            const gop = try map.getOrPut(arena, parent);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(arena, child);
+        }
+    }.add;
+    const sameThread = struct {
+        fn check(x: *const Record, y: *const Record) bool {
+            const x_side = x.get("isSidechain") orelse Value{ .bool = false };
+            const y_side = y.get("isSidechain") orelse Value{ .bool = false };
+            const x_flag: Value = if (x_side == .null) .{ .bool = false } else x_side;
+            const y_flag: Value = if (y_side == .null) .{ .bool = false } else y_side;
+            return jsStrictEqual(x_flag, y_flag) and jsStrictEqual(x.get("agentId"), y.get("agentId"));
+        }
+    }.check;
+    for (results.items) |record| {
+        const parent = nodes.get(record.uuid).?.parent;
+        if (nonEmptyString(parent)) |p| try addChild(a, &children, &added_child, p, record);
+        if (record.get("sourceToolAssistantUUID")) |source| if (source == .string and !jsStrictEqual(source, parent)) {
+            if (nodes.get(source.string)) |caller_node| if (sameThread(record, caller_node.record)) {
+                try addChild(a, &children, &added_child, caller_node.record.uuid, record);
+            };
+        };
+        for (try record.blockIds(a, "tool_result", "tool_use_id")) |tool| {
+            const caller = (callers.get(tool) orelse continue) orelse continue;
+            if (sameThread(record, caller)) try addChild(a, &children, &added_child, caller.uuid, record);
+        }
+    }
+    var answered_on_chain: std.StringHashMapUnmanaged(void) = .empty;
+    for (chain) |record| for (try record.blockIds(a, "tool_result", "tool_use_id")) |tool| try answered_on_chain.put(a, tool, {});
+    var key_position: std.StringHashMapUnmanaged(usize) = .empty;
+    for (nodes.keys(), 0..) |key, i| try key_position.put(a, key, i);
+
+    var done_messages: std.StringHashMapUnmanaged(void) = .empty;
+    var inserts: std.StringHashMapUnmanaged([]const *const Record) = .empty;
+    var inserted: usize = 0;
+    for (assistants.items) |assistant| {
+        const id = assistant.messageId();
+        if (id.len == 0 or done_messages.contains(id)) continue;
+        try done_messages.put(a, id, {});
+        const group: []const *const Record = if (parts.get(id)) |list| list.items else &.{assistant};
+        var group_ids: std.StringHashMapUnmanaged(void) = .empty;
+        for (group) |record| try group_ids.put(a, record.uuid, {});
+        var off_chain: std.ArrayList(*const Record) = .empty;
+        for (group) |record| if (!on_chain.contains(record.uuid)) try off_chain.append(a, record);
+        var direct: std.ArrayList(*const Record) = .empty;
+        var indirect: std.ArrayList(*const Record) = .empty;
+        var taken: std.StringHashMapUnmanaged(void) = .empty;
+        for (group) |record| {
+            const list = children.get(record.uuid) orelse continue;
+            for (list.items) |child| {
+                if (on_chain.contains(child.uuid) or taken.contains(child.uuid)) continue;
+                try taken.put(a, child.uuid, {});
+                const child_parent = nonEmptyString(nodes.get(child.uuid).?.parent);
+                if (child_parent != null and group_ids.contains(child_parent.?)) try direct.append(a, child) else try indirect.append(a, child);
+            }
+        }
+        if (indirect.items.len > 0) {
+            var answered: std.StringHashMapUnmanaged(void) = .empty;
+            var it = answered_on_chain.keyIterator();
+            while (it.next()) |tool| try answered.put(a, tool.*, {});
+            for (direct.items) |child| for (try child.blockIds(a, "tool_result", "tool_use_id")) |tool| try answered.put(a, tool, {});
+            const ByPosition = struct {
+                positions: *const std.StringHashMapUnmanaged(usize),
+                fn less(context: @This(), x: *const Record, y: *const Record) bool {
+                    const max = std.math.maxInt(usize);
+                    return (context.positions.get(x.uuid) orelse max) < (context.positions.get(y.uuid) orelse max);
+                }
+            };
+            std.mem.sort(*const Record, indirect.items, ByPosition{ .positions = &key_position }, ByPosition.less);
+            for (indirect.items) |child| {
+                const tools = try child.blockIds(a, "tool_result", "tool_use_id");
+                const answers_group = for (tools) |tool| {
+                    if (answered.contains(tool)) continue;
+                    const caller = (callers.get(tool) orelse continue) orelse continue;
+                    if (group_ids.contains(caller.uuid)) break true;
+                } else false;
+                if (!answers_group) continue;
+                for (tools) |tool| try answered.put(a, tool, {});
+                try direct.append(a, child);
+            }
+        }
+        if (off_chain.items.len == 0 and direct.items.len == 0) continue;
+        const ByTime = struct {
+            fn less(_: void, x: *const Record, y: *const Record) bool {
+                return std.mem.order(u8, x.str("timestamp"), y.str("timestamp")) == .lt;
+            }
+        };
+        std.mem.sort(*const Record, off_chain.items, {}, ByTime.less);
+        std.mem.sort(*const Record, direct.items, {}, ByTime.less);
+        var added: std.ArrayList(*const Record) = .empty;
+        try added.appendSlice(a, off_chain.items);
+        try added.appendSlice(a, direct.items);
+        for (added.items) |record| try on_chain.put(a, record.uuid, {});
+        inserted += added.items.len;
+        try inserts.put(a, last_of_message.get(id).?.uuid, added.items);
+    }
+    if (inserted == 0) return chain;
+    var out: std.ArrayList(*const Record) = .empty;
+    for (chain) |record| {
+        try out.append(a, record);
+        if (inserts.get(record.uuid)) |added| try out.appendSlice(a, added);
+    }
+    return out.items;
+}
+
+// ------------------------------------------------------------ fork titles
+
+/// The SDK reads titles from this much of the start and the end of a
+/// transcript.
+const title_window = 65536;
+
+/// The parent's title as the SDK finds it: the latest custom title near the
+/// end, else the sidecar title or one near the start, else an AI title,
+/// else the first prompt; "" when there is none.
+fn transcriptTitle(a: Allocator, data: []const u8, sidecar_title: ?[]const u8) Allocator.Error![]const u8 {
+    const head = data[0..@min(data.len, title_window)];
+    const tail = data[data.len -| title_window..];
+    const custom = if (try latestStringField(a, tail, "customTitle")) |t| t else if (sidecar_title) |t| t else try latestStringField(a, head, "customTitle");
+    if (custom) |t| if (t.len > 0) return t;
+    if (try latestStringField(a, tail, "aiTitle")) |t| if (t.len > 0) return t;
+    if (try latestStringField(a, head, "aiTitle")) |t| if (t.len > 0) return t;
+    return firstPromptTitle(a, head);
+}
+
+/// The value of the last `"key":"..."` (or `"key": "..."`) in `text`,
+/// found without decoding the JSON around it.
+fn latestStringField(a: Allocator, text: []const u8, key: []const u8) Allocator.Error!?[]const u8 {
+    var best: ?[]const u8 = null;
+    var best_at: isize = -1;
+    for ([_][]const u8{ "\":\"", "\": \"" }) |separator| {
+        const pattern = try std.fmt.allocPrint(a, "\"{s}{s}", .{ key, separator });
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, text, from, pattern)) |at| {
+            const start = at + pattern.len;
+            var i = start;
+            while (i < text.len) {
+                if (text[i] == '\\') {
+                    i += 2;
+                    continue;
+                }
+                if (text[i] == '"') {
+                    if (@as(isize, @intCast(at)) > best_at) {
+                        best = try unescape(a, text[start..i]);
+                        best_at = @intCast(at);
+                    }
+                    break;
+                }
+                i += 1;
+            }
+            from = i + 1;
+            if (from >= text.len) break;
+        }
+    }
+    return best;
+}
+
+/// A JSON string body decoded, or as is when it does not decode.
+fn unescape(a: Allocator, body: []const u8) Allocator.Error![]const u8 {
+    if (std.mem.indexOfScalar(u8, body, '\\') == null) return body;
+    const quoted = try std.fmt.allocPrint(a, "\"{s}\"", .{body});
+    const value = std.json.parseFromSliceLeaky([]const u8, a, quoted, .{ .allocate = .alloc_always }) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return body,
+    };
+    return value;
+}
+
+/// The first prompt among the user records in `head` that the SDK would
+/// title a session with, else the first slash command's name.
+fn firstPromptTitle(a: Allocator, head: []const u8) Allocator.Error![]const u8 {
+    var command_fallback: []const u8 = "";
+    var lines = std.mem.splitScalar(u8, head, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "\"type\":\"user\"") == null and std.mem.indexOf(u8, line, "\"type\": \"user\"") == null) continue;
+        if (std.mem.indexOf(u8, line, "\"tool_result\"") != null) continue;
+        if (std.mem.indexOf(u8, line, "\"isMeta\":true") != null or std.mem.indexOf(u8, line, "\"isMeta\": true") != null) continue;
+        if (std.mem.indexOf(u8, line, "\"isCompactSummary\":true") != null or std.mem.indexOf(u8, line, "\"isCompactSummary\": true") != null) continue;
+        const value = std.json.parseFromSliceLeaky(Value, a, line, .{ .parse_numbers = false, .allocate = .alloc_always, .duplicate_field_behavior = .use_last }) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => continue,
+        };
+        if (try promptTitle(a, value, &command_fallback)) |title| return title;
+    }
+    return command_fallback;
+}
+
+/// The title text of one user record, or null (the SDK's Ui).
+fn promptTitle(a: Allocator, value: Value, command_fallback: *[]const u8) Allocator.Error!?[]const u8 {
+    if (value != .object) return null;
+    const record = value.object;
+    if (!eql(stringOf(record.get("type")), "user")) return null;
+    if (jsStrictEqual(record.get("isMeta"), .{ .bool = true }) or jsStrictEqual(record.get("isCompactSummary"), .{ .bool = true })) return null;
+    const message = record.get("message") orelse return null;
+    if (!truthy(message)) return null;
+    const content = member(message, "content") orelse return null;
+    var texts: std.ArrayList([]const u8) = .empty;
+    switch (content) {
+        .string => |s| try texts.append(a, s),
+        .array => |blocks| for (blocks.items) |block| {
+            if (block != .object) continue;
+            const block_type = stringOf(block.object.get("type"));
+            if (eql(block_type, "tool_result")) return null;
+            if (eql(block_type, "text")) if (block.object.get("text")) |t| if (t == .string) try texts.append(a, t.string);
+        },
+        else => {},
+    }
+    for (texts.items) |raw_text| {
+        const unwrapped = try unwrapPastedContent(a, raw_text);
+        const text = jsTrim(try std.mem.replaceOwned(u8, a, unwrapped, "\n", " "));
+        if (text.len == 0) continue;
+        if (betweenTags(text, "<command-name>", "</command-name>", false)) |name| {
+            if (command_fallback.len == 0) command_fallback.* = name;
+            continue;
+        }
+        if (betweenTags(text, "<bash-input>", "</bash-input>", true)) |input| return try std.fmt.allocPrint(a, "! {s}", .{jsTrim(input)});
+        if (startsWithTagOrInterruption(text)) continue;
+        if (utf16Length(text) > 200) return try std.fmt.allocPrint(a, "{s}…", .{jsTrim(utf16Prefix(text, 200))});
+        return text;
+    }
+    return null;
+}
+
+/// The text between the first `open` and the next `close` after it. Without
+/// `any`, a line break ends the search, as "." in a JavaScript pattern.
+fn betweenTags(text: []const u8, open: []const u8, close: []const u8, any: bool) ?[]const u8 {
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, text, from, open)) |at| {
+        const start = at + open.len;
+        const end = std.mem.indexOfPos(u8, text, start, close) orelse return null;
+        const between = text[start..end];
+        if (any or (std.mem.indexOfScalar(u8, between, '\r') == null and std.mem.indexOf(u8, between, "\u{2028}") == null and std.mem.indexOf(u8, between, "\u{2029}") == null)) return between;
+        from = at + 1;
+    }
+    return null;
+}
+
+/// Whether text starts with an HTML-like tag or an interruption marker,
+/// which the SDK does not title sessions with.
+fn startsWithTagOrInterruption(text: []const u8) bool {
+    if (std.mem.startsWith(u8, text, "[Request interrupted by user")) {
+        if (std.mem.indexOfScalarPos(u8, text, "[Request interrupted by user".len, ']')) |_| return true;
+    }
+    var i: usize = 0;
+    while (i < text.len and std.ascii.isWhitespace(text[i])) i += 1;
+    if (i + 2 >= text.len or text[i] != '<' or !std.ascii.isLower(text[i + 1])) return false;
+    i += 2;
+    while (i < text.len and (std.ascii.isAlphanumeric(text[i]) or text[i] == '_' or text[i] == '-')) i += 1;
+    return i < text.len and (std.ascii.isWhitespace(text[i]) or text[i] == '>');
+}
+
+/// The number of UTF-16 code units of `text`.
+fn utf16Length(text: []const u8) usize {
+    var n: usize = 0;
+    var it = std.unicode.Utf8View.initUnchecked(text).iterator();
+    while (it.nextCodepoint()) |cp| n += if (cp >= 0x10000) 2 else 1;
+    return n;
+}
+
+/// The first `units` UTF-16 code units of `text`, without a split
+/// surrogate pair.
+fn utf16Prefix(text: []const u8, units: usize) []const u8 {
+    var n: usize = 0;
+    var it = std.unicode.Utf8View.initUnchecked(text).iterator();
+    while (true) {
+        const start = it.i;
+        const cp = it.nextCodepoint() orelse return text;
+        const width: usize = if (cp >= 0x10000) 2 else 1;
+        if (n + width > units) return text[0..start];
+        n += width;
+    }
+}
+
+/// `text` with pasted-content blocks replaced by their bodies.
+fn unwrapPastedContent(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
+    const open = "<pasted_content id=\"";
+    var out: std.ArrayList(u8) = .empty;
+    var parts: usize = 0;
+    var only_text = true;
+    var copied: usize = 0;
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, text, from, open)) |at| {
+        const id_start = at + open.len;
+        const id_end = id_start + 4;
+        if (id_end > text.len or !isPasteId(text[id_start..id_end]) or !std.mem.startsWith(u8, text[id_end..], "\">\n")) {
+            from = id_start;
+            continue;
+        }
+        const body_start = id_end + 3;
+        const close = try std.fmt.allocPrint(a, "\n</pasted_content id=\"{s}\">", .{text[id_start..id_end]});
+        const close_at = std.mem.indexOfPos(u8, text, body_start - 1, close) orelse break;
+        var text_end = at;
+        var newlines: usize = 0;
+        while (newlines < 2 and text_end > copied and text[text_end - 1] == '\n') : (newlines += 1) text_end -= 1;
+        if (text_end > copied) {
+            try out.appendSlice(a, text[copied..text_end]);
+            parts += 1;
+        }
+        var next = close_at + close.len;
+        newlines = 0;
+        while (newlines < 2 and next < text.len and text[next] == '\n') : (newlines += 1) next += 1;
+        try out.appendSlice(a, text[body_start..close_at]);
+        parts += 1;
+        only_text = false;
+        copied = next;
+        from = next;
+    }
+    if (copied < text.len) {
+        try out.appendSlice(a, text[copied..]);
+        parts += 1;
+    }
+    if (only_text and parts == 1) return text;
+    return out.items;
+}
+
+fn isPasteId(id: []const u8) bool {
+    for (id) |c| if (!std.ascii.isDigit(c) and !(c >= 'a' and c <= 'f')) return false;
+    return true;
+}
+
+/// Appends `value` and a line break as JavaScript's JSON.stringify writes
+/// it, so copied records keep their bytes: numbers stay as parsed
+/// (`parse_numbers = false`) and strings escape the same characters.
+fn writeLine(a: Allocator, out: *std.ArrayList(u8), value: Value) Allocator.Error!void {
+    try out.appendSlice(a, try agent.json.encodeValue(a, value));
+    try out.append(a, '\n');
+}
+
 test "project directory names match the SDK" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -719,4 +1888,133 @@ test "transcript graph follows the latest branch" {
     try std.testing.expectEqual(@as(usize, 2), try graph.promptIndex(a, "a2", null));
     const ids = try graph.itemIdsFrom(a, 2);
     try std.testing.expectEqual(@as(usize, 2), ids.len);
+}
+
+/// A small transcript: a prompt, a progress record, a tool call answered
+/// in a parallel record, a sidechain message, a team member's answer, and a
+/// custom title.
+const fork_fixture =
+    \\{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"P","timestamp":"2026-01-01T00:00:00.000Z","isSidechain":false,"message":{"role":"user","content":"hello there"}}
+    \\{"type":"progress","uuid":"p1","parentUuid":"u1","sessionId":"P","timestamp":"2026-01-01T00:00:01.000Z"}
+    \\{"type":"assistant","uuid":"a1","parentUuid":"p1","sessionId":"P","timestamp":"2026-01-01T00:00:02.000Z","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}
+    \\{"type":"user","uuid":"r1","parentUuid":"a1","sessionId":"P","timestamp":"2026-01-01T00:00:03.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok\u001b"}]},"sourceToolAssistantUUID":"a1"}
+    \\{"type":"assistant","uuid":"s1","parentUuid":"r1","sessionId":"P","isSidechain":true,"message":{"id":"m9","content":[]}}
+    \\{"type":"user","uuid":"u2","parentUuid":"r1","sessionId":"P","timestamp":"2026-01-01T00:00:04.000Z","message":{"content":"second"}}
+    \\{"type":"assistant","uuid":"a2","parentUuid":"u2","logicalParentUuid":"a1","sessionId":"P","timestamp":"2026-01-01T00:00:05.000Z","teamName":"x","cost":1.50,"message":{"id":"m2","content":[{"type":"text","text":"done ✓"}]}}
+    \\{"type":"custom-title","sessionId":"P","customTitle":"Parent title"}
+    \\{"type":"content-replacement","sessionId":"P","replacements":[{"k":1}]}
+    \\
+;
+
+test "fork copies the main conversation with new IDs" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const env: agent.Env = .{ .io = std.testing.io, .gpa = std.testing.allocator, .environ = std.testing.environ };
+    const now = "2026-02-02T00:00:00.000Z";
+    const fork = try forkEntries(a, env, fork_fixture, "P", .{}, null, now);
+    var lines: std.ArrayList(JsonView) = .empty;
+    var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, fork.bytes, "\n"), '\n');
+    while (it.next()) |line| try lines.append(a, JsonView.parseBytes(a, line));
+    // u1, a1, r1, u2, a2, the content replacements, and the title.
+    try std.testing.expectEqual(@as(usize, 7), lines.items.len);
+    const first = lines.items[0];
+    const answer = lines.items[1];
+    const last = lines.items[4];
+    try std.testing.expect(kit.isUuid(fork.session_id));
+    try std.testing.expectEqualStrings(fork.session_id, first.str("sessionId"));
+    try std.testing.expect(first.get("parentUuid").v.? == .null);
+    try std.testing.expectEqualStrings("u1", first.get("forkedFrom").str("messageUuid"));
+    try std.testing.expectEqualStrings("P", first.get("forkedFrom").str("sessionId"));
+    // The progress record is skipped in the parent chain.
+    try std.testing.expectEqualStrings(first.str("uuid"), answer.str("parentUuid"));
+    try std.testing.expectEqualStrings(answer.str("uuid"), last.get("logicalParentUuid").string());
+    try std.testing.expect(!last.has("teamName"));
+    try std.testing.expectEqualStrings(now, last.str("timestamp"));
+    try std.testing.expectEqualStrings("2026-01-01T00:00:00.000Z", first.str("timestamp"));
+    try std.testing.expectEqualStrings("content-replacement", lines.items[5].str("type"));
+    try std.testing.expectEqualStrings("Parent title (fork)", lines.items[6].str("customTitle"));
+    // Copied values keep their bytes.
+    try std.testing.expect(std.mem.indexOf(u8, fork.bytes, "\"cost\":1.50,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fork.bytes, "ok\\u001b") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fork.bytes, "done ✓") != null);
+
+    const cut = try forkEntries(a, env, fork_fixture, "P", .{ .up_to_message_id = "u2", .title = " Mine " }, null, now);
+    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, cut.bytes, "\n"));
+    try std.testing.expect(std.mem.indexOf(u8, cut.bytes, "\"customTitle\":\"Mine\"") != null);
+    try std.testing.expectError(error.MessageNotFound, forkEntries(a, env, fork_fixture, "P", .{ .up_to_message_id = "missing" }, null, now));
+}
+
+test "fork titles fall back to the first prompt" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const transcript = "{\"type\":\"user\",\"uuid\":\"u1\",\"message\":{\"content\":\"<command-name>/x</command-name>\"}}\n" ++
+        "{\"type\":\"user\",\"uuid\":\"u2\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"fix\\nthe bug \"}]}}\n";
+    try std.testing.expectEqualStrings("fix the bug", try transcriptTitle(a, transcript, null));
+    try std.testing.expectEqualStrings("Side", try transcriptTitle(a, transcript, "Side"));
+    try std.testing.expectEqualStrings("/x", try transcriptTitle(a, transcript[0 .. std.mem.indexOfScalar(u8, transcript, '\n').? + 1], null));
+}
+
+test "fork times are written as JavaScript writes them" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("1970-01-01T00:00:00.000Z", try isoTime(arena.allocator(), 0));
+    try std.testing.expectEqualStrings("2026-10-23T09:05:07.042Z", try isoTime(arena.allocator(), 1792746307042));
+}
+
+test "fork writes the transcript next to the parent's" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const cwd = "/work/project";
+    const parent_id = "0b4c3f0e-1d2a-4b5c-8d9e-0f1a2b3c4d5e";
+    const project = try std.fs.path.join(a, &.{ "projects", try projectDirName(a, cwd) });
+    try tmp.dir.createDirPath(io, project);
+    const fixture = try std.mem.replaceOwned(u8, a, fork_fixture, "\"P\"", "\"" ++ parent_id ++ "\"");
+    try tmp.dir.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ project, parent_id ++ ".jsonl" }), .data = fixture });
+
+    const env: agent.Env = .{ .io = io, .gpa = gpa, .environ = std.testing.environ };
+    const created = try @import("provider.zig").create(env, .{});
+    defer created.deinit();
+    const provider: *Provider = @ptrCast(@alignCast(created.ptr));
+    var config_env: types.StringMap = .{};
+    try config_env.map.put(a, "CLAUDE_CONFIG_DIR", root);
+    const cfg: types.Config = .{ .cwd = cwd, .env = config_env };
+    const fork_id = try forkTranscript(provider, a, cfg, parent_id, .{}, null);
+    const path = try findTranscript(provider, a, cfg, fork_id, cwd, null);
+    try std.testing.expectEqualStrings(project, std.fs.path.dirname(path).?[root.len + 1 ..]);
+    const written = try Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
+    try std.testing.expectEqual(@as(usize, 7), std.mem.count(u8, written, "\n"));
+    try std.testing.expectError(error.SessionNotFound, forkTranscript(provider, a, cfg, "1b4c3f0e-1d2a-4b5c-8d9e-0f1a2b3c4d5e", .{}, null));
+}
+
+// Forks for the differential check against the SDK: with
+// ACC_FORK_DIFF_DIR set to a Claude config directory, forks the session
+// ACC_FORK_DIFF_SESSION of working directory ACC_FORK_DIFF_CWD (up to
+// ACC_FORK_DIFF_UP_TO when set) and writes the fork's ID to
+// <dir>/fork-id.txt.
+test "fork differential entry" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const env: agent.Env = .{ .io = io, .gpa = gpa, .environ = std.testing.environ };
+    const dir = kit.getEnv(env, "ACC_FORK_DIFF_DIR") orelse return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const created = try @import("provider.zig").create(env, .{});
+    defer created.deinit();
+    const provider: *Provider = @ptrCast(@alignCast(created.ptr));
+    var config_env: types.StringMap = .{};
+    try config_env.map.put(a, "CLAUDE_CONFIG_DIR", dir);
+    const cfg: types.Config = .{ .cwd = kit.getEnv(env, "ACC_FORK_DIFF_CWD") orelse "", .env = config_env };
+    const fork_id = try forkTranscript(provider, a, cfg, kit.getEnv(env, "ACC_FORK_DIFF_SESSION") orelse "", .{
+        .up_to_message_id = kit.getEnv(env, "ACC_FORK_DIFF_UP_TO") orelse "",
+    }, null);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ dir, "fork-id.txt" }), .data = fork_id });
 }

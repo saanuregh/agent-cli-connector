@@ -71,6 +71,12 @@
         }
       }
     },
+    "provider/call": {
+      "params": {
+        "$ref": "#/$defs/ProviderCallParams"
+      },
+      "result": {}
+    },
     "session/start": {
       "params": {
         "$ref": "#/$defs/StartParams"
@@ -109,6 +115,14 @@
       },
       "result": {
         "$ref": "#/$defs/SessionInfo"
+      }
+    },
+    "session/state": {
+      "params": {
+        "$ref": "#/$defs/SessionParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SessionState"
       }
     },
     "session/interrupt": {
@@ -172,7 +186,7 @@
         "$ref": "#/$defs/TurnParams"
       },
       "result": {
-        "type": "null"
+        "$ref": "#/$defs/RewindResult"
       }
     },
     "session/stopTask": {
@@ -415,6 +429,30 @@
         "goals": {
           "type": "boolean"
         },
+        "tool_output_stream": {
+          "type": "boolean"
+        },
+        "plan_stream": {
+          "type": "boolean"
+        },
+        "rewind_changes_session_id": {
+          "type": "boolean"
+        },
+        "requests_from_subagents": {
+          "type": "boolean"
+        },
+        "background_turns": {
+          "type": "boolean"
+        },
+        "steer_interrupts_tools": {
+          "type": "boolean"
+        },
+        "dialogs": {
+          "type": "boolean"
+        },
+        "native_requests": {
+          "type": "boolean"
+        },
         "check": {
           "type": "boolean"
         },
@@ -431,6 +469,9 @@
           "type": "boolean"
         },
         "list_subagents": {
+          "type": "boolean"
+        },
+        "provider_call": {
           "type": "boolean"
         }
       }
@@ -549,6 +590,22 @@
         "session_id"
       ]
     },
+    "ProviderCallParams": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": {}
+      },
+      "required": [
+        "provider",
+        "method"
+      ]
+    },
     "StartParams": {
       "type": "object",
       "properties": {
@@ -657,6 +714,12 @@
           ]
         },
         "unset_env": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "command_prefix": {
           "type": "array",
           "items": {
             "type": "string"
@@ -889,6 +952,9 @@
           "items": {
             "$ref": "#/$defs/McpServerStatus"
           }
+        },
+        "context_window": {
+          "type": "integer"
         },
         "raw": {}
       }
@@ -1188,6 +1254,26 @@
               "type": "null"
             }
           ]
+        },
+        "dialog": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DialogResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "native": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NativeResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1269,6 +1355,59 @@
         "decline",
         "cancel"
       ]
+    },
+    "DialogResponse": {
+      "type": "object",
+      "properties": {
+        "behavior": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/DialogResponseBehavior"
+            }
+          ],
+          "default": "cancelled"
+        },
+        "result": {}
+      }
+    },
+    "DialogResponseBehavior": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "cancelled"
+      ]
+    },
+    "NativeResponse": {
+      "type": "object",
+      "properties": {
+        "result": {},
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NativeResponseError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "NativeResponseError": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "allOf": [
+            {
+              "type": "integer"
+            }
+          ],
+          "default": -32603
+        },
+        "message": {
+          "type": "string"
+        }
+      }
     },
     "EventNotification": {
       "type": "object",
@@ -1755,6 +1894,48 @@
               "type": "object",
               "properties": {
                 "type": {
+                  "const": "dialog_request"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            },
+            {
+              "$ref": "#/$defs/DialogRequest"
+            },
+            {
+              "$ref": "#/$defs/EventMeta"
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "native_request"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            },
+            {
+              "$ref": "#/$defs/NativeRequest"
+            },
+            {
+              "$ref": "#/$defs/EventMeta"
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
                   "const": "request_resolved"
                 }
               },
@@ -1848,6 +2029,27 @@
             },
             {
               "$ref": "#/$defs/ConversationReset"
+            },
+            {
+              "$ref": "#/$defs/EventMeta"
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "session_id_changed"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            },
+            {
+              "$ref": "#/$defs/SessionIdChanged"
             },
             {
               "$ref": "#/$defs/EventMeta"
@@ -1983,11 +2185,14 @@
         "permission_request",
         "user_input_request",
         "elicitation_request",
+        "dialog_request",
+        "native_request",
         "request_resolved",
         "rate_limit_updated",
         "hook_run",
         "goal_updated",
         "conversation_reset",
+        "session_id_changed",
         "items_removed",
         "events_dropped",
         "native",
@@ -2041,7 +2246,17 @@
     },
     "TurnStarted": {
       "type": "object",
-      "properties": {}
+      "properties": {
+        "native_turn_id": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "client_id": {
+          "type": "string"
+        }
+      }
     },
     "TurnCompleted": {
       "type": "object",
@@ -3048,6 +3263,39 @@
         }
       }
     },
+    "DialogRequest": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "data": {},
+        "tool_use_id": {
+          "type": "string"
+        },
+        "subagent_id": {
+          "type": "string"
+        }
+      }
+    },
+    "NativeRequest": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": {},
+        "subagent_id": {
+          "type": "string"
+        }
+      }
+    },
     "RequestResolved": {
       "type": "object",
       "properties": {
@@ -3072,7 +3320,9 @@
       "enum": [
         "permission",
         "user_input",
-        "elicitation"
+        "elicitation",
+        "dialog",
+        "native"
       ]
     },
     "RequestOutcome": {
@@ -3225,6 +3475,33 @@
           "type": "string"
         }
       }
+    },
+    "SessionIdChanged": {
+      "type": "object",
+      "properties": {
+        "previous_id": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "reason": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/SessionIdChangedReason"
+            }
+          ],
+          "default": "reset"
+        }
+      }
+    },
+    "SessionIdChangedReason": {
+      "type": "string",
+      "enum": [
+        "reset",
+        "rewind",
+        "resume"
+      ]
     },
     "ItemsRemoved": {
       "type": "object",
@@ -3578,6 +3855,12 @@
           "type": "boolean"
         },
         "tool_config": {},
+        "supported_dialog_kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "tool_server_name": {
           "type": "string"
         },
@@ -3697,6 +3980,12 @@
           }
         },
         "extra_args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "command_prefix": {
           "type": "array",
           "items": {
             "type": "string"
@@ -4088,6 +4377,66 @@
           "type": "string"
         },
         "raw": {}
+      }
+    },
+    "SessionState": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/SessionStatus"
+            }
+          ],
+          "default": "idle"
+        },
+        "running_turn_id": {
+          "type": "string"
+        },
+        "queued_turn_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Task"
+          }
+        },
+        "pending_requests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Event"
+          }
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        },
+        "info": {
+          "$ref": "#/$defs/SessionInfo"
+        },
+        "background_work": {
+          "type": "boolean"
+        }
+      }
+    },
+    "RewindResult": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "forked": {
+          "type": "boolean"
+        },
+        "removed_item_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     },
     "ToolCancelParams": {

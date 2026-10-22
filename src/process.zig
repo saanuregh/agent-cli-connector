@@ -17,6 +17,9 @@ const stderr_tail_lines = 40;
 /// still in the pipes. A descendant that left the process group could hold
 /// the pipes open forever.
 const drain_grace_ms = 2000;
+/// The longest output line read. A longer line is dropped with a warning,
+/// so one runaway message cannot exhaust memory.
+pub const max_line_bytes = 256 << 20;
 
 pub const Handler = struct {
     context: *anyopaque,
@@ -32,6 +35,8 @@ pub const Options = struct {
     /// Names the harness in errors.
     provider: []const u8,
     argv: []const []const u8,
+    /// Runs before `argv` on the command line, such as a wrapper.
+    command_prefix: []const []const u8 = &.{},
     cwd: []const u8 = "",
     /// Added to the inherited environment.
     env: ?types.StringMap = null,
@@ -83,13 +88,13 @@ pub const Process = struct {
         const a = arena.allocator();
 
         var env_map = try environment(env, a, opts, diag);
-        const exe = resolveExecutable(env, a, opts.argv[0], env_map.get("PATH") orelse "") orelse
+        const argv = try std.mem.concat(a, []const u8, &.{ opts.command_prefix, opts.argv });
+        const exe = resolveExecutable(env, a, argv[0], env_map.get("PATH") orelse "") orelse
             return errors.failWith(diag, .{
                 .kind = .not_found,
                 .code = "executable_not_found",
-                .message = try std.fmt.allocPrint(a, "{s}: executable \"{s}\" not found", .{ opts.provider, opts.argv[0] }),
+                .message = try std.fmt.allocPrint(a, "{s}: executable \"{s}\" not found", .{ opts.provider, argv[0] }),
             });
-        const argv = try a.dupe([]const u8, opts.argv);
         argv[0] = exe;
 
         const p = try gpa.create(Process);
@@ -286,23 +291,7 @@ pub const Process = struct {
     fn readLines(p: *Process, file: Io.File, comptime handle: fn (*Process, []const u8) void) void {
         var buf: [64 * 1024]u8 = undefined;
         var fr = file.readerStreaming(p.env.io, &buf);
-        const r = &fr.interface;
-        var line: Io.Writer.Allocating = .init(p.env.gpa);
-        defer line.deinit();
-        while (true) {
-            line.clearRetainingCapacity();
-            const end = blk: {
-                _ = r.streamDelimiter(&line.writer, '\n') catch |e| switch (e) {
-                    error.EndOfStream => break :blk true,
-                    error.ReadFailed, error.WriteFailed => break :blk true,
-                };
-                r.toss(1);
-                break :blk false;
-            };
-            const l = std.mem.trimEnd(u8, line.written(), "\r");
-            if (std.mem.trim(u8, l, " \t").len > 0) handle(p, l);
-            if (end) return;
-        }
+        splitLines(&fr.interface, p.env.gpa, max_line_bytes, p.provider, p, handle);
     }
 
     fn waitExit(p: *Process) void {
@@ -325,6 +314,51 @@ pub const Process = struct {
         p.handler.on_exit(p.handler.context, info);
     }
 };
+
+/// Reads `r` to its end and calls `handle` with each non-blank line, trailing
+/// CR removed. A line longer than `limit` bytes is dropped with a warning.
+fn splitLines(
+    r: *Io.Reader,
+    gpa: Allocator,
+    limit: usize,
+    provider: []const u8,
+    context: anytype,
+    comptime handle: fn (@TypeOf(context), []const u8) void,
+) void {
+    var line: Io.Writer.Allocating = .init(gpa);
+    defer line.deinit();
+    while (true) {
+        line.clearRetainingCapacity();
+        const end = blk: {
+            // One byte over the limit tells a line of exactly `limit` bytes
+            // from a longer one.
+            _ = r.streamDelimiterLimit(&line.writer, '\n', .limited(limit + 1)) catch |e| switch (e) {
+                error.StreamTooLong => {
+                    const rest = r.discardDelimiterInclusive('\n');
+                    log.warn("{s}: dropped an output line of {d}{s} bytes, over the {d}-byte limit", .{
+                        provider,
+                        line.written().len + (rest catch 0),
+                        if (rest) |_| "" else |_| " or more",
+                        limit,
+                    });
+                    // Keep the reader's memory small again.
+                    line.deinit();
+                    line = .init(gpa);
+                    _ = rest catch return;
+                    continue;
+                },
+                error.ReadFailed, error.WriteFailed => break :blk true,
+            };
+            // Without a delimiter in the buffer, the stream ended.
+            if (r.seek == r.end) break :blk true;
+            r.toss(1);
+            break :blk false;
+        };
+        const l = std.mem.trimEnd(u8, line.written(), "\r");
+        if (std.mem.trim(u8, l, " \t").len > 0) handle(context, l);
+        if (end) return;
+    }
+}
 
 /// The process ID behind a Windows process handle.
 fn windowsPid(handle: std.process.Child.Id) ?usize {
@@ -415,6 +449,33 @@ test "process round trip" {
     const tail = try p.stderrTail(gpa);
     defer gpa.free(tail);
     try std.testing.expectEqualStrings("err", tail);
+}
+
+test "a line over the limit is dropped and the next line is delivered" {
+    const Lines = struct {
+        arena: Allocator,
+        got: std.ArrayList([]const u8) = .empty,
+        fn line(self: *@This(), l: []const u8) void {
+            self.got.append(self.arena, self.arena.dupe(u8, l) catch return) catch {};
+        }
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var lines: Lines = .{ .arena = arena.allocator() };
+    // The dropped lines are logged as warnings, which the test runner
+    // would print.
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
+    const too_long: [40]u8 = @splat('x');
+    const at_limit: [16]u8 = @splat('y');
+    var r: Io.Reader = .fixed("short\n" ++ too_long ++ "\n" ++ at_limit ++ "\nnext\r\n" ++ too_long);
+    splitLines(&r, std.testing.allocator, 16, "test", &lines, Lines.line);
+    try std.testing.expectEqual(@as(usize, 3), lines.got.items.len);
+    try std.testing.expectEqualStrings("short", lines.got.items[0]);
+    // A line of exactly the limit is kept.
+    try std.testing.expectEqualStrings(&at_limit, lines.got.items[1]);
+    try std.testing.expectEqualStrings("next", lines.got.items[2]);
 }
 
 test "exit is reported while a descendant holds the output open" {

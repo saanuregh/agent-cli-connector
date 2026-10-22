@@ -1,6 +1,7 @@
 //! The control protocol: requests the host sends the CLI and their
 //! responses, requests the CLI sends the host (permissions, host tool MCP
-//! messages, hooks, elicitations), and the native `call` passthrough.
+//! messages, hooks, elicitations, dialogs), and the native `call`
+//! passthrough.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -283,8 +284,7 @@ fn handleControlRequest(claude: *ClaudeSession, launch: *Launch, a: Allocator, i
             };
             answer(claude, a, id, payload, null);
         },
-        // No dialog renderer: the dialog stays unanswered.
-        .request_user_dialog => {},
+        .request_user_dialog => try permissions.handleDialog(claude, a, id, request, request_bytes, line),
     }
 }
 
@@ -407,7 +407,7 @@ pub fn call(s: *Session, method: []const u8, params: ?RawJson, a: Allocator, dia
     const native = std.meta.stringToEnum(NativeMethod, method) orelse return sendRequest(claude, a, method, params, diag);
     const fields = JsonView.parseBytes(a, if (params) |p| p.bytes else "{}");
     switch (native) {
-        .rewind => return RawJson.of(try rewind_mod.rewindWithResult(claude, a, fields.str("turn_id"), diag)),
+        .rewind => return try RawJson.encode(a, try rewind_mod.rewindTurn(claude, a, fields.str("turn_id"), diag)),
         .interrupt => return RawJson.of(try session_mod.interruptWithOptions(claude, a, "", fields.flag("cancel_queued"), diag)),
         .cancel_async_message => {
             const cancelled = try session_mod.cancelQueuedMessage(claude, a, fields.str("message_uuid"), diag);

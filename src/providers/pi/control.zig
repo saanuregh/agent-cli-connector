@@ -31,18 +31,17 @@ pub fn getState(pi: *PiSession, a: Allocator, timeout_ms: i64, diag: ?*Diagnosti
 }
 
 /// Takes Pi's state into the session info.
-pub fn applyState(pi: *PiSession, a: Allocator, state: JsonView, announce: bool) Allocator.Error!void {
+pub fn applyState(pi: *PiSession, a: Allocator, state: JsonView, announce: bool, reason: types.SessionIdChangedReason) Allocator.Error!void {
     pi.rt().setSessionId(state.str("sessionId"));
     const model = state.get("model");
     pi.lock();
     if (model.object() != null) {
         pi.model_provider = .of(model.str("provider"));
-        pi.window = model.int("contextWindow");
         pi.model_images = if (model.get("input").v != null and model.get("input").v.? == .array) kit.contains(try model.get("input").strings(a), "image") else null;
     }
     const mode = pi.mode;
     pi.unlock();
-    try pi.rt().updateInfo(StateUpdate{ .pi = pi, .state = state, .mode = mode }, announce, StateUpdate.apply);
+    try pi.rt().updateInfoFor(StateUpdate{ .pi = pi, .state = state, .mode = mode }, announce, reason, StateUpdate.apply);
 }
 
 /// Pi's state and the permission mode, to take into the session info.
@@ -62,7 +61,11 @@ const StateUpdate = struct {
         info.title = state.str("sessionName");
         info.effort = decode.effortOf(state.str("thinkingLevel"));
         const model = state.get("model");
-        if (model.object() != null) info.model = try std.fmt.allocPrint(a, "{s}/{s}", .{ model.str("provider"), model.str("id") });
+        if (model.object() != null) {
+            info.model = try std.fmt.allocPrint(a, "{s}/{s}", .{ model.str("provider"), model.str("id") });
+            // The state's model is its entry in Pi's model list.
+            info.context_window = model.int("contextWindow");
+        }
         info.raw = try state.raw(a);
         var tools: std.ArrayList([]const u8) = .empty;
         try tools.appendSlice(a, info.tools);
@@ -125,15 +128,15 @@ fn commands(pi: *PiSession, a: Allocator, diag: ?*Diagnostics) Error![]const typ
 
 /// Reloads state after commands that change the session.
 fn refresh(pi: *PiSession, a: Allocator, diag: ?*Diagnostics) Error!void {
-    try applyState(pi, a, try getState(pi, a, 0, diag), true);
+    try applyState(pi, a, try getState(pi, a, 0, diag), true, .reset);
 }
 
 /// Reloads state after Pi replaced the session. Pi reloads extensions,
 /// prompts, and skills for the new session from its own directory, so the
 /// working directory and commands are read again.
-fn refreshSwitched(pi: *PiSession, a: Allocator, diag: ?*Diagnostics) Error!void {
+fn refreshSwitched(pi: *PiSession, a: Allocator, reason: types.SessionIdChangedReason, diag: ?*Diagnostics) Error!void {
     const state = try getState(pi, a, 0, diag);
-    try applyState(pi, a, state, false);
+    try applyState(pi, a, state, false, reason);
     try followSessionCwd(pi, a, state.str("sessionFile"));
     loadCommands(pi, a);
     try pi.announceInfo();
@@ -220,9 +223,9 @@ fn setModelOn(pi: *PiSession, a: Allocator, model: []const u8, diag: ?*Diagnosti
     const full = try std.fmt.allocPrint(a, "{s}/{s}", .{ new_provider, kit.firstOf(&.{ data.str("id"), wanted.id }) });
     pi.lock();
     pi.model_provider = .of(new_provider);
-    if (data.int("contextWindow") > 0) pi.window = data.int("contextWindow");
     pi.model_images = if (data.get("input").v != null) kit.contains(try data.get("input").strings(a), "image") else null;
     pi.unlock();
+    if (data.int("contextWindow") > 0) try pi.setInfoField(false, .context_window, data.int("contextWindow"));
     try pi.setInfoField(true, .model, full);
 }
 
@@ -299,22 +302,26 @@ fn userEntry(pi: *PiSession, a: Allocator, id: []const u8, diag: ?*Diagnostics) 
     return errors.fail(diag, .not_found, "pi: no user message for turn {s}", .{id});
 }
 
-/// Drops `turn_id` and every later turn. With the bridge loaded, the
-/// session moves back in place and keeps its ID; without it, the session
-/// forks at the message and its ID changes.
-pub fn rewind(session: *Session, turn_id: []const u8, diag: ?*Diagnostics) Error!void {
+/// Drops `turn_id` and every later turn by forking at its message into a
+/// new session file in the same process, as t3code does; the old file
+/// keeps the dropped turns. The session ID changes (`session_id_changed`
+/// with reason `rewind`).
+pub fn rewind(session: *Session, turn_id: []const u8, result_allocator: Allocator, diag: ?*Diagnostics) Error!types.RewindResult {
     const pi = PiSession.of(session);
     if (!session.rt.idle()) return errors.fail(diag, .invalid_params, "pi: cannot rewind while a turn runs or input is queued", .{});
     var arena: std.heap.ArenaAllocator = .init(pi.gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    return rewindTo(pi, a, try userEntry(pi, a, turn_id, diag), "rewind", diag);
+    const entry = try userEntry(pi, a, turn_id, diag);
+    const data = try forkAt(pi, a, entry, .rewind, diag);
+    if (data.flag("cancelled")) return errors.fail(diag, .cancelled, "pi: an extension cancelled the rewind", .{});
+    return .{ .session_id = try session.id(result_allocator), .forked = true };
 }
 
 /// Rewinds to `entry` in place through the bridge, else by forking there.
 fn rewindTo(pi: *PiSession, a: Allocator, entry: []const u8, verb: []const u8, diag: ?*Diagnostics) Error!void {
     if (!pi.bridgeDisabled() and pi.bridge_loaded.load(.acquire)) return rewindInPlace(pi, a, entry, diag);
-    const data = try forkAt(pi, a, entry, diag);
+    const data = try forkAt(pi, a, entry, .reset, diag);
     if (data.flag("cancelled")) return errors.fail(diag, .cancelled, "pi: an extension cancelled the {s}", .{verb});
 }
 
@@ -387,9 +394,9 @@ fn activeBranchIds(pi: *PiSession, a: Allocator, diag: ?*Diagnostics) Error!?std
 }
 
 /// Runs the fork command; callers hold the slot or own the session.
-fn forkAt(pi: *PiSession, a: Allocator, entry: []const u8, diag: ?*Diagnostics) Error!JsonView {
+fn forkAt(pi: *PiSession, a: Allocator, entry: []const u8, reason: types.SessionIdChangedReason, diag: ?*Diagnostics) Error!JsonView {
     const data = try pi.command(a, "fork", .{ .entryId = entry }, diag);
-    if (!data.flag("cancelled")) try refreshSwitched(pi, a, diag);
+    if (!data.flag("cancelled")) try refreshSwitched(pi, a, reason, diag);
     return data;
 }
 
@@ -524,7 +531,7 @@ fn runSwitch(pi: *PiSession, a: Allocator, command: SwitchCommand, params: ?RawJ
         },
         .clone, .fork => {},
     }
-    try refreshSwitched(pi, a, diag);
+    try refreshSwitched(pi, a, .reset, diag);
     return .{ .data = data };
 }
 

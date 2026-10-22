@@ -142,10 +142,16 @@ const TurnState = struct {
     /// The `submitted` ID of the turn this one joined; it ends with that
     /// turn's result.
     follows: Id = .{},
+    /// Who started the turn when not the host, from its `turn_started`.
+    origin: Id = .{},
+    /// The `Input.client_id` the turn runs, for its `turn_started`.
+    client_id: []const u8 = "",
 
     fn create(gpa: Allocator, id: []const u8, now_ms: i64, opts: TurnOptions) !*TurnState {
         const t = try gpa.create(TurnState);
         t.* = .{ .id = .of(id), .submitted = .of(id), .started_ms = now_ms, .arena = .init(gpa), .local = opts.local };
+        errdefer t.destroy(gpa);
+        t.client_id = try t.arena.allocator().dupe(u8, opts.client_id);
         return t;
     }
 
@@ -179,6 +185,9 @@ pub const Pending = struct {
 
 const Queued = struct { id: Id, arena: std.heap.ArenaAllocator, input: types.Input };
 
+/// The latest update of a task that has not finished.
+const LiveTask = struct { arena: std.heap.ArenaAllocator, task: types.Task };
+
 /// A result held back because its turn ended before the start in flight
 /// was accepted.
 const Parked = struct { id: Id, arena: std.heap.ArenaAllocator, result: TurnResult };
@@ -188,6 +197,8 @@ pub const TurnOptions = struct {
     /// The turn runs inside the library, such as a built-in command, with
     /// no harness run to steer. `isLocal` reports it until the turn ends.
     local: bool = false,
+    /// The `Input.client_id` of the turn's input.
+    client_id: []const u8 = "",
 };
 
 const recent_turns = 64;
@@ -303,6 +314,10 @@ pub const Runtime = struct {
     started: bool = false,
     early: std.ArrayList(*OwnedEvent) = .empty,
     last_status: types.SessionStatus = .idle,
+    /// The latest `usage_updated` usage.
+    usage: types.Usage = .{},
+    /// Unfinished tasks, from `task_updated`, oldest first.
+    live_tasks: std.ArrayList(*LiveTask) = .empty,
 
     turns: std.ArrayList(*TurnState) = .empty,
     recent: std.ArrayList(*TurnState) = .empty,
@@ -388,6 +403,8 @@ pub const Runtime = struct {
         r.starting.deinit(gpa);
         for (r.parked.items) |p| destroyParked(gpa, p);
         r.parked.deinit(gpa);
+        for (r.live_tasks.items) |t| destroyLiveTask(gpa, t);
+        r.live_tasks.deinit(gpa);
         r.session_id.deinit(gpa);
         r.info_arena.deinit();
         r.end_arena.deinit();
@@ -435,9 +452,14 @@ pub const Runtime = struct {
     /// Replaces the session info (copied). With `announce`, emits
     /// `session_updated` when the session has started.
     pub fn setInfo(r: *Runtime, info: types.SessionInfo, announce: bool) void {
+        r.setInfoFor(info, announce, .reset);
+    }
+
+    /// Like `setInfo`; a session ID change in `info` reports `reason`.
+    pub fn setInfoFor(r: *Runtime, info: types.SessionInfo, announce: bool, reason: types.SessionIdChangedReason) void {
         r.lock();
         defer r.unlock();
-        r.setInfoLocked(info);
+        r.setInfoLocked(info, reason);
         if (announce) r.announceInfoLocked();
     }
 
@@ -450,13 +472,24 @@ pub const Runtime = struct {
         announce: bool,
         comptime change: fn (@TypeOf(context), *types.SessionInfo, Allocator) Allocator.Error!void,
     ) Allocator.Error!void {
+        return r.updateInfoFor(context, announce, .reset, change);
+    }
+
+    /// Like `updateInfo`; a session ID change reports `reason`.
+    pub fn updateInfoFor(
+        r: *Runtime,
+        context: anytype,
+        announce: bool,
+        reason: types.SessionIdChangedReason,
+        comptime change: fn (@TypeOf(context), *types.SessionInfo, Allocator) Allocator.Error!void,
+    ) Allocator.Error!void {
         r.lock();
         defer r.unlock();
         var next: std.heap.ArenaAllocator = .init(r.env.gpa);
         errdefer next.deinit();
         var copy = try clone(types.SessionInfo, next.allocator(), r.info);
         try change(context, &copy, next.allocator());
-        r.replaceInfoLocked(next, copy);
+        r.replaceInfoLocked(next, copy, reason);
         if (announce) r.announceInfoLocked();
     }
 
@@ -464,22 +497,113 @@ pub const Runtime = struct {
         if (r.started and !r.finished) r.emitLocked(.{ .payload = .{ .session_updated = .{ .info = r.info } } });
     }
 
-    fn setInfoLocked(r: *Runtime, info: types.SessionInfo) void {
+    fn setInfoLocked(r: *Runtime, info: types.SessionInfo, reason: types.SessionIdChangedReason) void {
         var next: std.heap.ArenaAllocator = .init(r.env.gpa);
         const copy = clone(types.SessionInfo, next.allocator(), info) catch {
             next.deinit();
             log.err("out of memory: session info not updated", .{});
             return;
         };
-        r.replaceInfoLocked(next, copy);
+        r.replaceInfoLocked(next, copy, reason);
     }
 
-    /// Takes `copy`, allocated in `arena`, as the session info.
-    fn replaceInfoLocked(r: *Runtime, arena: std.heap.ArenaAllocator, copy: types.SessionInfo) void {
-        r.info_arena.deinit();
+    /// Takes `copy`, allocated in `arena`, as the session info. A new
+    /// session ID after start emits `session_id_changed`.
+    fn replaceInfoLocked(r: *Runtime, arena: std.heap.ArenaAllocator, copy: types.SessionInfo, reason: types.SessionIdChangedReason) void {
+        var old = r.info_arena;
+        defer old.deinit();
+        // Compared with the info, not `session_id`: providers often record
+        // the new ID with `setSessionId` before the info that carries it.
+        const previous = r.info.id;
         r.info_arena = arena;
         r.info = copy;
         if (copy.id.len > 0) r.setSessionIdLocked(copy.id);
+        if (r.started and !r.finished and previous.len > 0 and copy.id.len > 0 and !std.mem.eql(u8, previous, copy.id)) {
+            r.emitLocked(.{ .payload = .{ .session_id_changed = .{ .previous_id = previous, .id = copy.id, .reason = reason } } });
+        }
+    }
+
+    /// The context window of the session info; 0 when unknown.
+    pub fn contextWindow(r: *Runtime) i64 {
+        r.lock();
+        defer r.unlock();
+        return r.info.context_window;
+    }
+
+    /// Records a context window the provider learned, without an event.
+    pub fn setContextWindow(r: *Runtime, window: i64) void {
+        r.lock();
+        defer r.unlock();
+        _ = r.reconcileContextWindowLocked(window);
+    }
+
+    /// Keeps the info's context window and a usage window in step: a
+    /// reported window becomes the info's, and none reported is the info's.
+    fn reconcileContextWindowLocked(r: *Runtime, reported: i64) i64 {
+        if (reported > 0) r.info.context_window = reported;
+        return r.info.context_window;
+    }
+
+    /// A snapshot of the session, copied into `a`.
+    pub fn sessionState(r: *Runtime, a: Allocator) Allocator.Error!types.SessionState {
+        r.lock();
+        defer r.unlock();
+        const running = r.runningTurnLocked();
+        const queued = try a.alloc([]const u8, r.inputs.items.len);
+        for (r.inputs.items, queued) |q, *out| out.* = try a.dupe(u8, q.id.slice());
+        const tasks = try a.alloc(types.Task, r.live_tasks.items.len);
+        for (r.live_tasks.items, tasks) |t, *out| out.* = try clone(types.Task, a, t.task);
+        return .{
+            .status = r.last_status,
+            .running_turn_id = if (running) |t| try a.dupe(u8, t.submitted.slice()) else "",
+            .queued_turn_ids = queued,
+            .tasks = tasks,
+            .pending_requests = try r.pendingRequestsLocked(a),
+            .usage = r.usage,
+            .info = try clone(types.SessionInfo, a, r.info),
+            .background_work = tasks.len > 0 or if (running) |t| !t.origin.isEmpty() else false,
+        };
+    }
+
+    /// The turn the harness works on: the running slot's, else the oldest
+    /// unfinished turn that is neither queued nor joined to another.
+    fn runningTurnLocked(r: *Runtime) ?*TurnState {
+        if (!r.running.isEmpty()) return r.findTurn(r.running.slice());
+        for (r.turns.items) |t| {
+            if (!t.follows.isEmpty()) continue;
+            const queued = for (r.inputs.items) |q| {
+                if (t.matches(q.id.slice())) break true;
+            } else false;
+            if (!queued) return t;
+        }
+        return null;
+    }
+
+    /// Records `task` as the latest update of its task, or forgets the task
+    /// once it finished.
+    fn trackTaskLocked(r: *Runtime, task: types.Task) void {
+        if (task.id.len == 0) return;
+        const gpa = r.env.gpa;
+        const known: ?usize = for (r.live_tasks.items, 0..) |t, i| {
+            if (std.mem.eql(u8, t.task.id, task.id)) break i;
+        } else null;
+        if (task.status != .running) {
+            if (known) |i| destroyLiveTask(gpa, r.live_tasks.orderedRemove(i));
+            return;
+        }
+        const t = gpa.create(LiveTask) catch return log.err("out of memory: task {s} not tracked", .{task.id});
+        t.* = .{ .arena = .init(gpa), .task = undefined };
+        t.task = clone(types.Task, t.arena.allocator(), task) catch {
+            destroyLiveTask(gpa, t);
+            return log.err("out of memory: task {s} not tracked", .{task.id});
+        };
+        if (known) |i| {
+            destroyLiveTask(gpa, r.live_tasks.items[i]);
+            r.live_tasks.items[i] = t;
+        } else r.live_tasks.append(gpa, t) catch {
+            destroyLiveTask(gpa, t);
+            log.err("out of memory: task {s} not tracked", .{task.id});
+        };
     }
 
     // ------------------------------------------------------------ events
@@ -516,9 +640,18 @@ pub const Runtime = struct {
                 if (sc.status == r.last_status) return;
                 r.last_status = sc.status;
             },
+            .usage_updated => |*u| {
+                u.usage.context_window = r.reconcileContextWindowLocked(u.usage.context_window);
+                r.usage = u.usage;
+            },
+            .task_updated => |tu| r.trackTaskLocked(tu.task),
             else => {},
         }
         r.stampLocked(&ev);
+        if (ev.payload == .turn_started) if (r.findTurn(ev.turn_id)) |t| {
+            t.origin = .of(ev.payload.turn_started.origin);
+            if (ev.payload.turn_started.client_id.len == 0) ev.payload.turn_started.client_id = t.client_id;
+        };
         if (r.findTurn(ev.turn_id)) |t| switch (ev.payload) {
             .item_completed => |ic| {
                 // A turn result missing an item is better than a lost event.
@@ -586,7 +719,7 @@ pub const Runtime = struct {
         while (i < r.events.len) : (i += 1) {
             const ev = r.events.at(i);
             switch (ev.event.payload) {
-                .permission_request, .user_input_request, .elicitation_request, .turn_completed, .session_started => continue,
+                .permission_request, .user_input_request, .elicitation_request, .dialog_request, .native_request, .turn_completed, .session_started => continue,
                 else => {},
             }
             r.removeEventLocked(i).destroy();
@@ -611,7 +744,7 @@ pub const Runtime = struct {
         r.lock();
         defer r.unlock();
         if (r.finished or r.started) return;
-        r.setInfoLocked(info);
+        r.setInfoLocked(info, .reset);
         var ev: Event = .{ .payload = .{ .session_started = .{ .info = r.info, .resumed = resumed } } };
         r.stampLocked(&ev);
         r.started = true;
@@ -630,7 +763,7 @@ pub const Runtime = struct {
         if (ev.time_ms == 0) ev.time_ms = r.env.nowMs();
         if (!r.include_raw) ev.raw = null;
         if (ev.turn_id.len == 0 and r.turns.items.len > 0) switch (ev.payload) {
-            .session_started, .session_updated, .wire => {},
+            .session_started, .session_updated, .session_id_changed, .wire => {},
             // The running turn, else the oldest unfinished one: queued
             // turns produce no events.
             else => ev.turn_id = if (!r.running.isEmpty()) r.running.slice() else r.turns.items[0].id.slice(),
@@ -705,6 +838,13 @@ pub const Runtime = struct {
         r.lock();
         defer r.unlock();
         return r.newTurnLocked(id, .{}, diag);
+    }
+
+    /// `newTurn` with `opts`.
+    pub fn newTurnFor(r: *Runtime, id: []const u8, opts: TurnOptions, diag: ?*Diagnostics) errors.Error!void {
+        r.lock();
+        defer r.unlock();
+        return r.newTurnLocked(id, opts, diag);
     }
 
     fn newTurnLocked(r: *Runtime, id: []const u8, opts: TurnOptions, diag: ?*Diagnostics) errors.Error!void {
@@ -975,6 +1115,8 @@ pub const Runtime = struct {
             .permission_request => |p| .{ .permission, p.id },
             .user_input_request => |p| .{ .user_input, p.id },
             .elicitation_request => |p| .{ .elicitation, p.id },
+            .dialog_request => |p| .{ .dialog, p.id },
+            .native_request => |p| .{ .native, p.id },
             else => unreachable,
         };
         for (r.early_withdrawn.items, 0..) |w, i| if (w.eql(req_id)) {
@@ -1117,6 +1259,10 @@ pub const Runtime = struct {
     pub fn pendingRequests(r: *Runtime, a: Allocator) Allocator.Error![]Event {
         r.lock();
         defer r.unlock();
+        return r.pendingRequestsLocked(a);
+    }
+
+    fn pendingRequestsLocked(r: *Runtime, a: Allocator) Allocator.Error![]Event {
         var out: std.ArrayList(Event) = .empty;
         for (r.pending.items) |p| if (p.state == .pending and !p.answering) {
             try out.append(a, try clone(Event, a, p.event.event));
@@ -1261,7 +1407,7 @@ pub const Runtime = struct {
             break :blk r.starter.?;
         };
         const Ctx = struct { starter: Starter, id: []const u8, in: types.Input };
-        return r.startIdle(id, .{}, Ctx{ .starter = starter, .id = id, .in = in }, diag, struct {
+        return r.startIdle(id, .{ .client_id = in.client_id }, Ctx{ .starter = starter, .id = id, .in = in }, diag, struct {
             fn start(c: Ctx, d: ?*Diagnostics) errors.Error!void {
                 return c.starter.start(c.starter.context, c.id, c.in, d);
             }
@@ -1273,7 +1419,9 @@ pub const Runtime = struct {
     pub fn enqueue(r: *Runtime, id: []const u8, in: types.Input, opts: TurnOptions, diag: ?*Diagnostics) errors.Error!void {
         r.lock();
         defer r.unlock();
-        try r.newTurnLocked(id, opts, diag);
+        var turn_options = opts;
+        turn_options.client_id = in.client_id;
+        try r.newTurnLocked(id, turn_options, diag);
         const q = try r.env.gpa.create(Queued);
         q.* = .{ .id = .of(id), .arena = .init(r.env.gpa), .input = undefined };
         q.input = clone(types.Input, q.arena.allocator(), in) catch |e| {
@@ -1306,7 +1454,7 @@ pub const Runtime = struct {
     /// - optionally a field `local: bool`, registering the turn as local.
     pub fn submit(r: *Runtime, id: []const u8, in: types.Input, diag: ?*Diagnostics, hooks: anytype) errors.Error!void {
         const Hooks = @TypeOf(hooks);
-        const opts: TurnOptions = .{ .local = if (@hasField(Hooks, "local")) hooks.local else false };
+        const opts: TurnOptions = .{ .local = if (@hasField(Hooks, "local")) hooks.local else false, .client_id = in.client_id };
         const Start = struct {
             hooks: Hooks,
             id: []const u8,
@@ -1625,6 +1773,11 @@ fn destroyParked(gpa: Allocator, p: *Parked) void {
     gpa.destroy(p);
 }
 
+fn destroyLiveTask(gpa: Allocator, t: *LiveTask) void {
+    t.arena.deinit();
+    gpa.destroy(t);
+}
+
 /// The result a joining turn ends with: `res` under the joining turn's own
 /// IDs, which `finishTurn` fills in.
 /// The result of a turn that joined `res`'s turn: its outcome, without the
@@ -1883,6 +2036,150 @@ test "submit starts idle input and dispatches the rest by delivery" {
     try std.testing.expectEqualStrings("t3", r.inputs.items[0].id.slice());
     try std.testing.expectEqualStrings("t4", r.inputs.items[1].id.slice());
     try std.testing.expectEqualStrings("t5", r.inputs.items[2].id.slice());
+    r.finish(null);
+}
+
+test "turn_started carries the client ID of the submitted input" {
+    var threaded: Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var r: Runtime = .init(testEnv(&threaded), "test", .{});
+    defer r.deinit();
+    r.markStarted(.{ .id = "s1" }, false);
+    var log_buf: std.ArrayList(u8) = .empty;
+    defer log_buf.deinit(std.testing.allocator);
+    const d: TestDelivery = .{ .log = &log_buf };
+
+    try r.submit("t1", .{ .text = "a", .client_id = "client-1" }, null, d);
+    _ = r.accepted("t1", "");
+    try r.submit("t2", .{ .text = "b", .delivery = .queue, .client_id = "client-2" }, null, d);
+    r.emit(.{ .turn_id = "t1", .payload = .{ .turn_started = .{} } });
+    r.emit(.{ .turn_id = "t2", .payload = .{ .turn_started = .{ .client_id = "from-provider" } } });
+    r.emit(.{ .turn_id = "other", .payload = .{ .turn_started = .{} } });
+    r.finish(null);
+
+    const want = [_][]const u8{ "client-1", "from-provider", "" };
+    var seen: usize = 0;
+    while (r.nextEvent(.none)) |ev| {
+        defer ev.destroy();
+        if (ev.event.payload != .turn_started) continue;
+        try std.testing.expectEqualStrings(want[seen], ev.event.payload.turn_started.client_id);
+        seen += 1;
+    } else |_| {}
+    try std.testing.expectEqual(want.len, seen);
+}
+
+test "usage events and the session info share one context window" {
+    var threaded: Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var r: Runtime = .init(testEnv(&threaded), "test", .{});
+    defer r.deinit();
+    r.markStarted(.{ .id = "s1", .context_window = 1000 }, false);
+    r.emitPayload(.{ .usage_updated = .{ .usage = .{ .context_tokens = 5 } } }, null);
+    try std.testing.expectEqual(@as(i64, 1000), r.usage.context_window);
+    r.emitPayload(.{ .usage_updated = .{ .usage = .{ .context_window = 2000 } } }, null);
+    r.emitPayload(.{ .usage_updated = .{ .usage = .{ .context_tokens = 6 } } }, null);
+    try std.testing.expectEqual(@as(i64, 2000), r.usage.context_window);
+    try std.testing.expectEqual(@as(i64, 2000), r.contextWindow());
+    r.setContextWindow(3000);
+    r.emitPayload(.{ .usage_updated = .{ .usage = .{} } }, null);
+    try std.testing.expectEqual(@as(i64, 3000), r.usage.context_window);
+    r.finish(null);
+
+    const want = [_]i64{ 1000, 2000, 2000, 3000 };
+    var seen: usize = 0;
+    while (r.nextEvent(.none)) |ev| {
+        defer ev.destroy();
+        if (ev.event.payload != .usage_updated) continue;
+        try std.testing.expectEqual(want[seen], ev.event.payload.usage_updated.usage.context_window);
+        seen += 1;
+    } else |_| {}
+    try std.testing.expectEqual(want.len, seen);
+}
+
+test "a session ID change after start emits session_id_changed with its reason" {
+    var threaded: Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var r: Runtime = .init(testEnv(&threaded), "test", .{});
+    defer r.deinit();
+    r.markStarted(.{ .id = "s1" }, false);
+    // Providers record the new ID before the info that carries it.
+    r.setSessionId("s2");
+    r.setInfo(.{ .id = "s2" }, true);
+    r.setInfoFor(.{ .id = "s3", .title = "same ID, no event" }, false, .rewind);
+    r.setInfo(.{ .id = "s3" }, false);
+    r.finish(null);
+
+    const Want = struct { tag: std.meta.Tag(Event.Payload), session: []const u8 };
+    const want = [_]Want{
+        .{ .tag = .session_started, .session = "s1" },
+        .{ .tag = .session_id_changed, .session = "s2" },
+        .{ .tag = .session_updated, .session = "s2" },
+        .{ .tag = .session_id_changed, .session = "s3" },
+    };
+    const reasons = [_]types.SessionIdChangedReason{ .reset, .rewind };
+    const previous = [_][]const u8{ "s1", "s2" };
+    var changes: usize = 0;
+    for (want) |w| {
+        const ev = try r.nextEvent(.none);
+        defer ev.destroy();
+        try std.testing.expectEqual(w.tag, ev.event.kind());
+        try std.testing.expectEqualStrings(w.session, ev.event.session_id);
+        if (ev.event.payload == .session_id_changed) {
+            const c = ev.event.payload.session_id_changed;
+            try std.testing.expectEqualStrings(previous[changes], c.previous_id);
+            try std.testing.expectEqualStrings(w.session, c.id);
+            try std.testing.expectEqual(reasons[changes], c.reason);
+            changes += 1;
+        }
+    }
+    try std.testing.expectError(error.EndOfStream, r.nextEvent(.none));
+}
+
+test "state lists unfinished tasks, the running and queued turns, and background work" {
+    var threaded: Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var r: Runtime = .init(testEnv(&threaded), "test", .{});
+    defer r.deinit();
+    r.markStarted(.{ .id = "s1" }, false);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    r.emitPayload(.{ .task_updated = .{ .task = .{ .id = "task-1", .kind = .subagent, .description = "look around" } } }, null);
+    r.emitPayload(.{ .usage_updated = .{ .usage = .{ .context_tokens = 7 } } }, null);
+    var st = try r.sessionState(a);
+    try std.testing.expectEqual(@as(usize, 1), st.tasks.len);
+    try std.testing.expectEqualStrings("look around", st.tasks[0].description);
+    try std.testing.expect(st.background_work);
+    try std.testing.expectEqualStrings("s1", st.info.id);
+    try std.testing.expectEqual(@as(i64, 7), st.usage.context_tokens);
+
+    r.emitPayload(.{ .task_updated = .{ .task = .{ .id = "task-1", .status = .completed } } }, null);
+    st = try r.sessionState(a);
+    try std.testing.expectEqual(@as(usize, 0), st.tasks.len);
+    try std.testing.expect(!st.background_work);
+
+    // A turn the harness started on its own is background work.
+    _ = r.runStarted("bg");
+    r.emit(.{ .turn_id = "bg", .payload = .{ .turn_started = .{ .origin = "task_notification" } } });
+    r.emit(.{ .turn_id = "bg", .payload = .{ .status_changed = .{ .status = .running } } });
+    st = try r.sessionState(a);
+    try std.testing.expectEqualStrings("bg", st.running_turn_id);
+    try std.testing.expectEqual(types.SessionStatus.running, st.status);
+    try std.testing.expect(st.background_work);
+    r.finishTurn("bg", .{});
+
+    // Host input: one running, one queued; neither is background work.
+    var log_buf: std.ArrayList(u8) = .empty;
+    defer log_buf.deinit(std.testing.allocator);
+    try r.submit("t1", .{ .text = "a" }, null, TestDelivery{ .log = &log_buf });
+    _ = r.accepted("t1", "");
+    try r.submit("t2", .{ .text = "b" }, null, TestDelivery{ .log = &log_buf });
+    st = try r.sessionState(a);
+    try std.testing.expectEqualStrings("t1", st.running_turn_id);
+    try std.testing.expectEqual(@as(usize, 1), st.queued_turn_ids.len);
+    try std.testing.expectEqualStrings("t2", st.queued_turn_ids[0]);
+    try std.testing.expect(!st.background_work);
     r.finish(null);
 }
 

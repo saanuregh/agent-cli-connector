@@ -163,8 +163,8 @@ type app struct {
 	mu         sync.Mutex
 	provider   string
 	sess       *agent.Session
-	rendered   chan struct{} // closed when the active session's events end
-	items      []agent.Item  // completed transcript items, oldest first
+	rendered   chan struct{}    // closed when the active session's events end
+	transcript agent.Transcript // the session's items, oldest first
 	tasks      map[string]agent.Task
 	turns      []*sentTurn
 	usage      agent.Usage
@@ -227,7 +227,7 @@ func (a *app) attach(provider string, sess *agent.Session) {
 	old := a.sess
 	a.provider, a.sess = provider, sess
 	a.rendered = make(chan struct{})
-	a.items = nil
+	a.transcript.Reset()
 	a.tasks = map[string]agent.Task{}
 	a.turns = nil
 	a.usage = agent.Usage{}

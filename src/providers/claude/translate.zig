@@ -72,7 +72,6 @@ pub const Translator = struct {
     turn_error_text: []u8 = &.{},
     limit_resets_at_ms: i64 = 0,
     turn_usage: types.Usage = .{},
-    context_window: i64 = 0,
     context_tokens: i64 = 0,
     request: decode.RequestUsage = .{},
     main_model: []u8 = &.{},
@@ -296,10 +295,11 @@ pub const Translator = struct {
         translator.emit(meta, .{ .native = .{ .name = "claude/" ++ event_name, .data = try RawJson.encode(a, data) } });
     }
 
-    /// Records that the CLI moved the conversation to session `id`.
-    fn moveSession(translator: *Translator, id: []const u8) void {
+    /// Records that the CLI moved the conversation to session `id`, for
+    /// `reason`.
+    fn moveSession(translator: *Translator, id: []const u8, reason: types.SessionIdChangedReason) void {
         translator.claude.rt().setSessionId(id);
-        translator.claude.setInfoField("id", id);
+        translator.claude.setInfoFieldFor("id", id, reason);
     }
 
     // ------------------------------------------------------------ dispatch
@@ -327,8 +327,13 @@ pub const Translator = struct {
         const session_id = message.str("session_id");
         if (session_id.len > 0 and message.str("parent_tool_use_id").len == 0 and !eql(session_id, try translator.claude.sessionId(a))) {
             // The CLI moved the conversation to a new session, such as
-            // after a hook or /clear; resume must name the new one.
-            translator.moveSession(session_id);
+            // after a hook or /clear; resume must name the new one. A
+            // resumed session the CLI announces under another ID moved on
+            // resume.
+            const current = try translator.claude.sessionId(a);
+            const resumed = eql(message.str("type"), "system") and eql(message.str("subtype"), "init") and
+                translator.claude.cfg.resume_id.len > 0 and eql(current, translator.claude.cfg.resume_id);
+            translator.moveSession(session_id, if (resumed) .@"resume" else .reset);
         }
         const message_type = std.meta.stringToEnum(MessageType, message.str("type")) orelse return translator.raw(a, message, line);
         switch (message_type) {
@@ -374,7 +379,7 @@ pub const Translator = struct {
         const uuid = message.str("command_uuid");
         const state = message.str("state");
         if (std.meta.stringToEnum(CommandState, state)) |known| switch (known) {
-            .started => try translator.turnStarted(uuid, meta),
+            .started => try translator.turnStarted(uuid, message.str("wakeup_source"), meta),
             .cancelled => translator.claude.rt().abandonTurn(uuid, .{ .kind = .cancelled, .message = "message cancelled" }),
             // The CLI completes a message whose uuid its transcript already
             // holds without running it, and nothing will answer it. A
@@ -389,7 +394,7 @@ pub const Translator = struct {
 
     fn conversationReset(translator: *Translator, a: Allocator, message: JsonView, meta: Meta) !void {
         const new_id = message.str("new_conversation_id");
-        if (new_id.len > 0 and !eql(new_id, try translator.claude.sessionId(a))) translator.moveSession(new_id);
+        if (new_id.len > 0 and !eql(new_id, try translator.claude.sessionId(a))) translator.moveSession(new_id, .reset);
         // Rewind cannot reach the dropped conversation's turns any more.
         translator.claude.turn_items.reset(translator.io(), translator.gpa);
         {
@@ -405,14 +410,15 @@ pub const Translator = struct {
     }
 
     /// Marks a submitted message's turn as started. Messages the host did
-    /// not send (such as automatic follow-ups) are tracked too.
-    fn turnStarted(translator: *Translator, id: []const u8, meta_in: Meta) Allocator.Error!void {
+    /// not send (such as automatic follow-ups) are tracked too; a wakeup
+    /// source names what started one.
+    fn turnStarted(translator: *Translator, id: []const u8, wakeup_source: []const u8, meta_in: Meta) Allocator.Error!void {
         if (id.len == 0 or translator.started_turns.contains(id)) return;
         try translator.started_turns.put(translator.gpa, id, {});
         if (!translator.claude.rt().hasTurn(id)) translator.claude.rt().trackTurn(id);
         var meta = meta_in;
         meta.turn_id = id;
-        translator.emit(meta, .{ .turn_started = .{} });
+        translator.emit(meta, .{ .turn_started = .{ .origin = wakeup_source } });
         translator.emit(meta, .{ .status_changed = .{ .status = .running } });
     }
 
@@ -507,7 +513,6 @@ pub const Translator = struct {
     fn emitUsage(translator: *Translator, meta: Meta) void {
         var snapshot = translator.turn_usage;
         snapshot.context_tokens = translator.context_tokens;
-        snapshot.context_window = translator.context_window;
         translator.emit(meta, .{ .usage_updated = .{ .usage = snapshot } });
     }
 
@@ -998,14 +1003,12 @@ pub const Translator = struct {
         const info = try translator.claude.rt().sessionInfo(a);
         const active = firstOf(&.{ translator.main_model, info.model });
         const active_window = model_usage.get(active).int("contextWindow");
-        if (active_window > 0) {
-            translator.context_window = active_window;
-        } else if (model_usage.object()) |models| {
-            var widest: i64 = 0;
-            for (models.values()) |v| widest = @max(widest, JsonView.of(v).int("contextWindow"));
-            if (widest > 0) translator.context_window = widest;
-        }
-        usage.context_window = translator.context_window;
+        var window = active_window;
+        if (window <= 0) if (model_usage.object()) |models| {
+            for (models.values()) |v| window = @max(window, JsonView.of(v).int("contextWindow"));
+        };
+        if (window > 0) translator.claude.rt().setContextWindow(window);
+        usage.context_window = if (window > 0) window else info.context_window;
         usage.context_tokens = translator.context_tokens;
         translator.turn_usage = .{};
 
@@ -1230,7 +1233,7 @@ pub const Translator = struct {
     }
 
     fn systemInit(translator: *Translator, a: Allocator, message: JsonView, meta: Meta) !void {
-        for (message.get("user_message_uuids").items()) |id| if (id == .string) try translator.turnStarted(id.string, meta);
+        for (message.get("user_message_uuids").items()) |id| if (id == .string) try translator.turnStarted(id.string, "", meta);
         try translator.applyInit(a, message);
         // The CLI repeats plugin errors in every init message.
         const key = if (try message.get("plugin_errors").raw(a)) |errors_raw| errors_raw.bytes else "null";

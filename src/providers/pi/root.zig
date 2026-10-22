@@ -44,10 +44,13 @@
 //!
 //!   - Images are refused with `unsupported` when the current model does
 //!     not list "image" input.
-//!   - With the bridge loaded, rewind moves the session back in place, so
-//!     the session ID stays; live user message items carry their Pi entry
-//!     ID as the item ID, which rewind and fork_at_turn accept. Without the
-//!     bridge, rewind forks at the turn's prompt and the session ID changes.
+//!   - Rewind forks at the turn's prompt into a new session file in the
+//!     same process, so the session ID changes (`session_id_changed` with
+//!     reason `rewind`); the old file keeps the dropped turns. Live user
+//!     message items carry their Pi entry ID as the item ID, which rewind
+//!     and fork_at_turn accept.
+//!   - Pi 0.99.0 or newer is required: the bridge registers MCP servers
+//!     with `pi.registerMcpServer`.
 //!   - Interrupt clears Pi's queued steering and follow-up messages before
 //!     it aborts; input queued by this library still runs afterwards.
 //!   - A steer that Pi queues into the running run gets its own turn ID,
@@ -104,4 +107,50 @@ test "capabilities follow the bridge setting" {
     defer without.deinit();
     try std.testing.expect(!without.capabilities().host_tools);
     try std.testing.expectEqual(@as(usize, 0), without.capabilities().permission_modes.len);
+}
+
+/// A stand-in for "pi --mode rpc": answers every command, and after a fork
+/// reports a new session ID.
+const fake_pi_script =
+    \\sid=s1
+    \\while IFS= read -r line; do
+    \\  id=${line#*\"id\":\"}; id=${id%%\"*}
+    \\  case $line in
+    \\  *'"type":"get_state"'*) data="{\"sessionId\":\"$sid\",\"sessionFile\":\"\"}";;
+    \\  *'"type":"fork"'*) sid=s2; data='{"cancelled":false}';;
+    \\  *'"type":"get_commands"'*) data='{"commands":[]}';;
+    \\  *) data='{}';;
+    \\  esac
+    \\  printf '{"type":"response","id":"%s","success":true,"data":%s}\n' "$id" "$data"
+    \\done
+;
+
+test "command_prefix launches Pi, and rewind forks with session_id_changed" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const env: agent.Env = .{ .io = threaded.io(), .gpa = gpa, .environ = .empty };
+    const p = try create(env, .{ .disable_bridge = true, .path = "/nonexistent/pi" });
+    defer p.deinit();
+    var diag: agent.Diagnostics = .{};
+    // The prefix runs the fake; the Pi path and its arguments become the
+    // script's ignored positional parameters.
+    const session = try p.start(.{ .config = .{ .command_prefix = &.{ "/bin/sh", "-c", fake_pi_script, "fake-pi" } } }, &diag);
+    defer session.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const result = try session.rewind("entry-1", arena.allocator(), &diag);
+    try std.testing.expect(result.forked);
+    try std.testing.expectEqualStrings("s2", result.session_id);
+    while (true) {
+        const ev = try session.nextEvent(.{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+        defer ev.destroy();
+        if (ev.event.payload != .session_id_changed) continue;
+        const change = ev.event.payload.session_id_changed;
+        try std.testing.expectEqualStrings("s1", change.previous_id);
+        try std.testing.expectEqualStrings("s2", change.id);
+        try std.testing.expectEqual(.rewind, change.reason);
+        break;
+    }
 }
