@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	agent "github.com/saanuregh/agent-cli-connector"
+	agent "github.com/saanuregh/agent-cli-connector/bindings/go"
 )
 
 // commands lists every command with its help text, in /help order.
@@ -36,7 +36,7 @@ var commands = []struct{ name, args, help string }{
 	{"decline", "", "decline the oldest MCP elicitation"},
 	{"cancel", "[n]", "cancel request n (a permission's cancel also stops the turn)"},
 	{"info", "", "session metadata: model, effort, mode, tools, MCP servers"},
-	{"caps", "", "the session's capabilities and optional controls"},
+	{"caps", "", "the session's capabilities"},
 	{"model", "[n|id]", "list models, or switch to one"},
 	{"effort", "[n|level]", "list the current model's efforts, or set one"},
 	{"mode", "[n|mode]", "list permission modes, or set one"},
@@ -58,9 +58,10 @@ var commands = []struct{ name, args, help string }{
 	{"history", "[session id] [n]", "the last n items of a stored session (default: this one)"},
 	{"subagents", "[session id]", "subagents a stored session ran (default: this one)"},
 	{"delete", "[n|session id] confirm", "list stored sessions, or delete one (cannot be undone)"},
-	{"events", "[on|off|Type,...]", "print every event, or only these types"},
+	{"events", "[on|off|type,...]", "print every event, or only these types, such as text_delta"},
 	{"reasoning", "[on|off]", "stream the model's reasoning"},
-	{"wire", "[on|off]", "print every raw protocol line (-wire sends them to a file)"},
+	{"wire", "[on|off]", "print every raw protocol line (needs -wire at start)"},
+	{"call", "<method> [json]", "send a native harness request (Claude control, Codex method, Pi command)"},
 	{"quit", "", "end the chat"},
 }
 
@@ -148,20 +149,20 @@ func (a *app) command(name, args string) {
 			return
 		}
 		in := agent.Text(args)
-		in.Delivery = map[string]agent.Delivery{"steer": agent.DeliverSteer, "now": agent.DeliverInterrupt}[name]
+		in.Delivery = map[string]agent.Delivery{"steer": agent.DeliverySteer, "now": agent.DeliveryInterrupt}[name]
 		a.send(in, args)
 	case "interrupt":
 		if args == "" {
 			a.report(sess.Interrupt(ctx))
 			return
 		}
-		ti, ok := sess.(agent.TurnInterrupter)
-		if !a.supported(ok, "TurnInterrupter") {
+		a.report(sess.InterruptTurn(ctx, args))
+	case "pending":
+		pending, err := sess.PendingRequests(ctx)
+		if err != nil {
+			a.report(err)
 			return
 		}
-		a.report(ti.InterruptTurn(ctx, args))
-	case "pending":
-		pending := sess.PendingRequests()
 		if len(pending) == 0 {
 			a.printf("no pending requests\n")
 		}
@@ -170,44 +171,44 @@ func (a *app) command(name, args string) {
 		}
 	case "allow":
 		n, rest := leadingNumber(args)
-		req, err := requestOf[*agent.PermissionRequest](a, n)
+		req, err := requestOf[agent.PermissionRequest](a, n)
 		if err != nil {
 			a.report(err)
 			return
 		}
-		decision := map[string]agent.PermissionDecision{"": agent.DecisionAllow, "once": agent.DecisionAllow,
-			"session": agent.DecisionAllowSession, "always": agent.DecisionAllowAlways}[rest]
+		decision := map[string]agent.PermissionDecision{"": agent.PermissionDecisionAllow, "once": agent.PermissionDecisionAllow,
+			"session": agent.PermissionDecisionAllowSession, "always": agent.PermissionDecisionAllowAlways}[rest]
 		if decision == "" {
 			a.printf("usage: /allow [n] [once|session|always]\n")
 			return
 		}
-		a.report(req.Respond(ctx, agent.PermissionResponse{Decision: decision}))
+		a.report(sess.Respond(ctx, req.ID, agent.PermissionResponse{Decision: decision}))
 	case "deny":
 		n, reason := leadingNumber(args)
-		req, err := requestOf[*agent.PermissionRequest](a, n)
+		req, err := requestOf[agent.PermissionRequest](a, n)
 		if err != nil {
 			a.report(err)
 			return
 		}
-		a.report(req.Deny(ctx, cmp.Or(reason, "The user refused.")))
+		a.report(sess.Deny(ctx, req.ID, cmp.Or(reason, "The user refused.")))
 	case "answer":
-		req, err := requestOf[*agent.UserInputRequest](a, 0)
+		req, err := requestOf[agent.UserInputRequest](a, 0)
 		if err != nil {
 			a.report(err)
 			return
 		}
-		a.report(answerQuestions(ctx, req, args))
+		a.report(answerQuestions(ctx, sess, req, args))
 	case "accept", "decline":
-		e, err := requestOf[*agent.ElicitationRequest](a, 0)
+		e, err := requestOf[agent.ElicitationRequest](a, 0)
 		if err != nil {
 			a.report(err)
 			return
 		}
 		if name == "decline" {
-			a.report(e.Decline(ctx))
+			a.report(sess.Decline(ctx, e.ID))
 			return
 		}
-		var content json.RawMessage
+		var content any
 		if args != "" {
 			if !json.Valid([]byte(args)) {
 				a.printf("the form content must be JSON\n")
@@ -215,19 +216,47 @@ func (a *app) command(name, args string) {
 			}
 			content = json.RawMessage(args)
 		}
-		a.report(e.Accept(ctx, content))
+		a.report(sess.Accept(ctx, e.ID, content))
 	case "cancel":
 		n, _ := leadingNumber(args)
-		req, err := requestOf[agent.Request](a, n)
+		req, err := requestOf[agent.EventPayload](a, n)
 		if err != nil {
 			a.report(err)
 			return
 		}
-		a.report(req.Cancel(ctx))
+		switch req := req.(type) {
+		case agent.PermissionRequest:
+			a.report(sess.Respond(ctx, req.ID, agent.PermissionResponse{Decision: agent.PermissionDecisionCancel}))
+		case agent.UserInputRequest:
+			a.report(sess.Respond(ctx, req.ID, agent.UserInputResponse{Cancelled: true}))
+		case agent.ElicitationRequest:
+			a.report(sess.Respond(ctx, req.ID, agent.ElicitationResponse{Action: agent.ElicitationResponseActionCancel}))
+		}
 	case "info":
-		a.showInfo(sess.Info())
+		info, err := sess.FetchInfo(ctx)
+		if err != nil {
+			info = sess.Info()
+		}
+		a.showInfo(info)
 	case "caps":
-		a.showCaps(sess)
+		data, _ := json.MarshalIndent(sess.Capabilities(), "  ", "  ")
+		a.printf("  %s\n", data)
+	case "call":
+		method, params, _ := strings.Cut(args, " ")
+		var p any
+		if params = strings.TrimSpace(params); params != "" {
+			if !json.Valid([]byte(params)) {
+				a.printf("usage: /call <method> [json]\n")
+				return
+			}
+			p = json.RawMessage(params)
+		}
+		var result json.RawMessage
+		if err := sess.Call(ctx, method, p, &result); err != nil {
+			a.report(err)
+			return
+		}
+		a.printf("%s\n", cmp.Or(string(result), "null"))
 	case "model":
 		a.modelCommand(sess, args)
 	case "effort":
@@ -242,16 +271,14 @@ func (a *app) command(name, args string) {
 			}
 			return
 		}
-		mode := choose(args, modes, func(m agent.PermissionMode) string { return string(m) })
-		a.report(sess.SetPermissionMode(ctx, agent.PermissionMode(mode)))
+		a.report(sess.SetPermissionMode(ctx, agent.PermissionMode(choose(args, modes, func(m agent.PermissionMode) string { return string(m) }))))
 	case "turns":
 		a.showTurns()
 	case "transcript":
 		n := positiveOr(args, 20)
 		a.mu.Lock()
-		transcript := a.transcript
+		items := slices.Clone(a.items)
 		a.mu.Unlock()
-		items := transcript.Items()
 		a.showItems(items[max(0, len(items)-n):])
 	case "usage":
 		a.mu.Lock()
@@ -268,10 +295,6 @@ func (a *app) command(name, args string) {
 			a.printf("  %s  %-8s %-9s %s\n", t.ID, t.Kind, t.Status, oneLine(cmp.Or(t.Description, t.Summary), 80))
 		}
 	case "stoptask":
-		ts, ok := sess.(agent.TaskStopper)
-		if !a.supported(ok, "TaskStopper") {
-			return
-		}
 		running := a.taskList(true)
 		if args == "" {
 			if len(running) == 0 {
@@ -282,55 +305,45 @@ func (a *app) command(name, args string) {
 			}
 			return
 		}
-		a.report(ts.StopTask(ctx, choose(args, running, func(t agent.Task) string { return t.ID })))
+		a.report(sess.StopTask(ctx, choose(args, running, func(t agent.Task) string { return t.ID })))
 	case "title":
-		t, ok := sess.(agent.Titler)
-		if a.supported(ok, "Titler") {
-			a.report(t.SetTitle(ctx, args))
-		}
+		a.report(sess.SetTitle(ctx, args))
 	case "compact":
-		c, ok := sess.(agent.Compacter)
-		if a.supported(ok, "Compacter") {
-			a.printf("[compacting…]\n")
-			a.report(c.Compact(ctx, args))
-		}
+		a.printf("[compacting…]\n")
+		a.report(sess.Compact(ctx, args))
 	case "fork":
 		a.forkCommand(sess, args)
 	case "rewind":
 		a.rewindCommand(sess, args)
 	case "limits":
-		rl, ok := sess.(agent.RateLimitReader)
-		if !a.supported(ok, "RateLimitReader") {
-			return
-		}
-		limits, err := rl.RateLimits(ctx)
+		limits, err := sess.RateLimits(ctx)
 		if err != nil {
 			a.report(err)
 			return
 		}
 		for _, l := range limits {
-			a.printf("  %s %s: %.0f%% used, %s%s\n", cmp.Or(l.LimitID, "plan"), l.Name, l.UsedPercent, l.Status, resetNote(l.ResetsAt))
+			a.printf("  %s %s: %.0f%% used, %s%s\n", cmp.Or(l.LimitID, "plan"), l.Name, l.UsedPercent, l.Status, resetNote(l.ResetsAtMs))
 		}
 	case "new":
-		provider, _, _ := a.active()
+		provider, _ := a.active()
 		a.report(a.start(provider, a.cfg))
 	case "resume":
 		id, ok := a.chooseSession(sess, args, "")
 		if !ok {
 			return
 		}
-		provider, _, _ := a.active()
+		provider, _ := a.active()
 		cfg := a.cfg
-		cfg.Resume = id
+		cfg.ResumeID = id
 		a.report(a.start(provider, cfg))
 	case "provider":
-		names := a.registry.Names()
+		names := a.providerNames()
 		if args == "" {
 			a.showProviders(names)
 			return
 		}
 		provider := choose(args, names, func(n string) string { return n })
-		if _, ok := a.registry.Get(provider); !ok {
+		if !slices.Contains(names, provider) {
 			a.printf("unknown provider %q; /provider lists them\n", provider)
 			return
 		}
@@ -372,8 +385,17 @@ func (a *app) command(name, args string) {
 	}
 }
 
+// providerNames lists the providers the client offers.
+func (a *app) providerNames() []string {
+	var names []string
+	for _, p := range a.client.Providers() {
+		names = append(names, p.Name)
+	}
+	return names
+}
+
 // skillCommand lists the harness's skills, or sends one with text.
-func (a *app) skillCommand(sess agent.Session, args string) {
+func (a *app) skillCommand(sess *agent.Session, args string) {
 	var skills []agent.SlashCommand
 	for _, c := range sess.Info().Commands {
 		if c.Kind == "skill" {
@@ -434,7 +456,7 @@ func schemaInput(args string) (agent.Input, error) {
 	return in, nil
 }
 
-func (a *app) modelCommand(sess agent.Session, args string) {
+func (a *app) modelCommand(sess *agent.Session, args string) {
 	models, listErr := a.models()
 	if args != "" {
 		a.report(sess.SetModel(a.ctx, choose(args, models, func(m agent.Model) string { return m.ID })))
@@ -451,7 +473,7 @@ func (a *app) modelCommand(sess agent.Session, args string) {
 	}
 }
 
-func (a *app) effortCommand(sess agent.Session, args string) {
+func (a *app) effortCommand(sess *agent.Session, args string) {
 	info := sess.Info()
 	var efforts []agent.Effort
 	modelID := info.Model
@@ -461,11 +483,10 @@ func (a *app) effortCommand(sess agent.Session, args string) {
 		}
 	}
 	if args != "" {
-		effort := choose(args, efforts, func(e agent.Effort) string { return string(e) })
-		a.report(sess.SetEffort(a.ctx, agent.Effort(effort)))
+		a.report(sess.SetEffort(a.ctx, agent.Effort(choose(args, efforts, func(e agent.Effort) string { return string(e) }))))
 		return
 	}
-	a.printf("effort: %s\n", cmp.Or(string(info.Effort), unset))
+	a.printf("effort: %s\n", cmp.Or(info.Effort, unset))
 	if len(efforts) == 0 {
 		a.printf("no effort list for %s; /model lists each model's efforts\n", cmp.Or(modelID, "the current model"))
 		return
@@ -483,21 +504,19 @@ type turnChoice struct {
 // turnChoices lists the session's turns: from its stored history when the
 // provider can read it, so a resumed session shows its earlier turns too,
 // then any turns of this chat the history does not have yet.
-func (a *app) turnChoices(sess agent.Session) []turnChoice {
+func (a *app) turnChoices(sess *agent.Session) []turnChoice {
 	var out []turnChoice
 	seen := map[string]bool{}
-	_, p, _ := a.active()
+	provider, _ := a.active()
 	a.mu.Lock()
 	sent := slices.Clone(a.turns)
 	a.mu.Unlock()
-	if hr, ok := p.(agent.HistoryReader); ok {
-		items, err := hr.ReadHistory(a.ctx, sess.ID(), agent.ReadHistoryOptions{Cwd: sess.Info().Cwd})
-		if err == nil {
-			for _, it := range items {
-				if it.Kind == agent.ItemUserMessage && it.TurnID != "" && !seen[it.TurnID] && !it.Synthetic {
-					seen[it.TurnID] = true
-					out = append(out, turnChoice{id: it.TurnID, prompt: it.Text})
-				}
+	items, err := a.client.ReadHistory(a.ctx, provider, sess.ID(), agent.ReadHistoryOptions{Cwd: sess.Info().Cwd})
+	if err == nil {
+		for _, it := range items {
+			if it.Kind == agent.ItemKindUserMessage && it.TurnID != "" && !seen[it.TurnID] && !it.Synthetic {
+				seen[it.TurnID] = true
+				out = append(out, turnChoice{id: it.TurnID, prompt: it.Text})
 			}
 		}
 	}
@@ -510,21 +529,13 @@ func (a *app) turnChoices(sess agent.Session) []turnChoice {
 	return out
 }
 
-func (a *app) rewindCommand(sess agent.Session, args string) {
-	r, ok := sess.(agent.Rewinder)
-	if !a.supported(ok, "Rewinder") {
-		return
-	}
+func (a *app) rewindCommand(sess *agent.Session, args string) {
 	if turn, ok := a.chooseTurn(sess, args, "/rewind n drops turn n and everything after it"); ok {
-		a.report(r.Rewind(a.ctx, turn))
+		a.report(sess.Rewind(a.ctx, turn))
 	}
 }
 
-func (a *app) forkCommand(sess agent.Session, args string) {
-	f, ok := sess.(agent.Forker)
-	if !a.supported(ok, "Forker") {
-		return
-	}
+func (a *app) forkCommand(sess *agent.Session, args string) {
 	turn, ok := a.chooseTurn(sess, args, "/fork n keeps the conversation through turn n; /fork all copies all of it")
 	if !ok {
 		return
@@ -532,13 +543,13 @@ func (a *app) forkCommand(sess agent.Session, args string) {
 	if turn == "all" {
 		turn = ""
 	}
-	forked, err := f.ForkSession(a.ctx, agent.Config{ForkAtTurn: turn})
+	forked, err := sess.Fork(a.ctx, agent.Config{ForkAtTurn: turn})
 	if err != nil {
 		a.report(err)
 		return
 	}
 	a.printf("[forked %s into %s; continuing in the fork]\n", sess.ID(), forked.ID())
-	provider, _, _ := a.active()
+	provider, _ := a.active()
 	a.attach(provider, forked)
 }
 
@@ -548,7 +559,7 @@ func (a *app) forkCommand(sess agent.Session, args string) {
 // chooseSession resolves args to a stored session ID: an ID as given, or a
 // number from the stored session list. Empty args lists the sessions, then
 // hint when set.
-func (a *app) chooseSession(sess agent.Session, args, hint string) (string, bool) {
+func (a *app) chooseSession(sess *agent.Session, args, hint string) (string, bool) {
 	if args != "" && !isNumber(args) {
 		return args, true
 	}
@@ -566,7 +577,7 @@ func (a *app) chooseSession(sess agent.Session, args, hint string) (string, bool
 	return "", false
 }
 
-func (a *app) chooseTurn(sess agent.Session, args, hint string) (string, bool) {
+func (a *app) chooseTurn(sess *agent.Session, args, hint string) (string, bool) {
 	if args != "" && !isNumber(args) {
 		return args, true
 	}
@@ -617,7 +628,7 @@ func (a *app) taskList(running bool) []agent.Task {
 	defer a.mu.Unlock()
 	tasks := make([]agent.Task, 0, len(a.tasks))
 	for _, t := range a.tasks {
-		if !running || t.Status == agent.TaskRunning {
+		if !running || t.Status == agent.TaskStatusRunning {
 			tasks = append(tasks, t)
 		}
 	}
@@ -626,13 +637,9 @@ func (a *app) taskList(running bool) []agent.Task {
 }
 
 // storedSessions lists up to limit stored sessions in sess's folder.
-func (a *app) storedSessions(sess agent.Session, limit int) ([]agent.SessionSummary, bool) {
-	_, p, _ := a.active()
-	sl, ok := p.(agent.SessionLister)
-	if !a.supported(ok, "SessionLister") {
-		return nil, false
-	}
-	list, err := sl.ListSessions(a.ctx, agent.ListSessionsOptions{Cwd: sess.Info().Cwd, Limit: limit})
+func (a *app) storedSessions(sess *agent.Session, limit int) ([]agent.SessionSummary, bool) {
+	provider, _ := a.active()
+	list, err := a.client.ListSessions(a.ctx, provider, agent.ListSessionsOptions{Cwd: sess.Info().Cwd, Limit: int64(limit)})
 	if err != nil {
 		a.report(err)
 		return nil, false
@@ -640,13 +647,13 @@ func (a *app) storedSessions(sess agent.Session, limit int) ([]agent.SessionSumm
 	return list, true
 }
 
-func (a *app) showSessions(sess agent.Session, list []agent.SessionSummary) {
+func (a *app) showSessions(sess *agent.Session, list []agent.SessionSummary) {
 	if len(list) == 0 {
 		a.printf("no stored sessions in %s\n", sess.Info().Cwd)
 	}
 	current := sess.ID()
 	for i, s := range list {
-		a.printf("  %d. %s%s  %s  %s\n", i+1, mark(s.ID == current), s.ID, s.UpdatedAt.Local().Format(time.DateTime),
+		a.printf("  %d. %s%s  %s  %s\n", i+1, mark(s.ID == current), s.ID, time.UnixMilli(s.UpdatedAtMs).Local().Format(time.DateTime),
 			oneLine(cmp.Or(s.Title, s.LastPrompt, s.FirstPrompt), 60))
 	}
 }
@@ -658,20 +665,14 @@ func (a *app) showProviders(names []string) {
 	var wg sync.WaitGroup
 	for i, name := range names {
 		wg.Go(func() {
-			p, _ := a.registry.Get(name)
-			c, ok := p.(agent.Checker)
-			if !ok {
-				statuses[i] = "no check"
-				return
-			}
 			ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
 			defer cancel()
-			st, err := c.Check(ctx)
+			st, err := a.client.Check(ctx, name)
 			switch {
 			case err != nil:
 				statuses[i] = err.Error()
-			case st.Err != nil:
-				statuses[i] = oneLine(st.Err.Error(), 80)
+			case st.Error != nil:
+				statuses[i] = oneLine(st.Error.Message, 80)
 			default:
 				statuses[i] = "version " + cmp.Or(st.Version, "unknown")
 				if st.Auth != nil && st.Auth.Authenticated {
@@ -681,19 +682,15 @@ func (a *app) showProviders(names []string) {
 		})
 	}
 	wg.Wait()
-	current, _, _ := a.active()
+	current, _ := a.active()
 	for i, name := range names {
 		a.printf("  %d. %s%-9s %s\n", i+1, mark(name == current), name, statuses[i])
 	}
 }
 
 func (a *app) checkCommand() {
-	_, p, _ := a.active()
-	c, ok := p.(agent.Checker)
-	if !a.supported(ok, "Checker") {
-		return
-	}
-	st, err := c.Check(a.ctx)
+	provider, _ := a.active()
+	st, err := a.client.Check(a.ctx, provider)
 	if err != nil {
 		a.report(err)
 		return
@@ -703,18 +700,14 @@ func (a *app) checkCommand() {
 		a.printf(", signed in %v (%s %s %s)", st.Auth.Authenticated, st.Auth.Method, st.Auth.Email, st.Auth.Plan)
 	}
 	a.printf("\n")
-	if st.Err != nil {
-		a.printf("problem: %v\n", st.Err)
+	if st.Error != nil {
+		a.printf("problem: %s\n", st.Error.Message)
 	}
 }
 
 // historyCommand reads "/history [session id] [n]".
 func (a *app) historyCommand(args string) {
-	_, p, sess := a.active()
-	hr, ok := p.(agent.HistoryReader)
-	if !a.supported(ok, "HistoryReader") {
-		return
-	}
+	provider, sess := a.active()
 	id, n := sess.ID(), 20
 	fields := strings.Fields(args)
 	if len(fields) == 1 && isNumber(fields[0]) {
@@ -729,7 +722,7 @@ func (a *app) historyCommand(args string) {
 			n = v
 		}
 	}
-	items, err := hr.ReadHistory(a.ctx, id, agent.ReadHistoryOptions{Cwd: sess.Info().Cwd, Limit: n})
+	items, err := a.client.ReadHistory(a.ctx, provider, id, agent.ReadHistoryOptions{Cwd: sess.Info().Cwd, Limit: int64(n)})
 	if err != nil {
 		a.report(err)
 		return
@@ -738,12 +731,8 @@ func (a *app) historyCommand(args string) {
 }
 
 func (a *app) subagentsCommand(args string) {
-	_, p, sess := a.active()
-	sl, ok := p.(agent.SubagentLister)
-	if !a.supported(ok, "SubagentLister") {
-		return
-	}
-	tasks, err := sl.ListSubagents(a.ctx, cmp.Or(args, sess.ID()), agent.ListSubagentsOptions{Cwd: sess.Info().Cwd})
+	provider, sess := a.active()
+	tasks, err := a.client.ListSubagents(a.ctx, provider, cmp.Or(args, sess.ID()), sess.Info().Cwd)
 	if err != nil {
 		a.report(err)
 		return
@@ -757,13 +746,9 @@ func (a *app) subagentsCommand(args string) {
 }
 
 func (a *app) deleteCommand(args string) {
-	_, p, sess := a.active()
-	sd, ok := p.(agent.SessionDeleter)
-	if !a.supported(ok, "SessionDeleter") {
-		return
-	}
+	provider, sess := a.active()
 	target, confirm, _ := strings.Cut(args, " ")
-	target, ok = a.chooseSession(sess, target, "/delete n confirm deletes session n; it cannot be undone")
+	target, ok := a.chooseSession(sess, target, "/delete n confirm deletes session n; it cannot be undone")
 	if !ok {
 		return
 	}
@@ -775,7 +760,7 @@ func (a *app) deleteCommand(args string) {
 		a.printf("refusing to delete the active session\n")
 		return
 	}
-	a.report(sd.DeleteSession(a.ctx, target, sess.Info().Cwd))
+	a.report(a.client.DeleteSession(a.ctx, provider, target, sess.Info().Cwd))
 }
 
 func (a *app) showInfo(i agent.SessionInfo) {
@@ -787,28 +772,8 @@ func (a *app) showInfo(i agent.SessionInfo) {
 	if len(i.Commands) > 0 {
 		a.printf("slash commands: %d (/commands lists them)\n", len(i.Commands))
 	}
-	for _, m := range i.MCPServers {
+	for _, m := range i.McpServers {
 		a.printf("mcp %s: %s %s\n", m.Name, m.Status, m.Error)
-	}
-}
-
-func (a *app) showCaps(sess agent.Session) {
-	data, _ := json.MarshalIndent(sess.Capabilities(), "  ", "  ")
-	a.printf("  %s\n", data)
-	optional := []struct {
-		name string
-		ok   bool
-	}{
-		{"Titler (/title)", is[agent.Titler](sess)},
-		{"Compacter (/compact)", is[agent.Compacter](sess)},
-		{"Forker (/fork)", is[agent.Forker](sess)},
-		{"Rewinder (/rewind)", is[agent.Rewinder](sess)},
-		{"TaskStopper (/stoptask)", is[agent.TaskStopper](sess)},
-		{"RateLimitReader (/limits)", is[agent.RateLimitReader](sess)},
-		{"TurnInterrupter (/interrupt <turn>)", is[agent.TurnInterrupter](sess)},
-	}
-	for _, o := range optional {
-		a.printf("  %-38s %v\n", o.name, o.ok)
 	}
 }
 
@@ -837,7 +802,7 @@ func (a *app) setEventFilter(args string) {
 	default:
 		a.verbose, a.eventTypes = true, map[string]bool{}
 		for _, t := range strings.Split(args, ",") {
-			a.eventTypes[strings.ToLower(strings.TrimSpace(t))] = true
+			a.eventTypes[strings.TrimSpace(t)] = true
 		}
 	}
 	a.printf("events %s\n", onOff(a.verbose))
@@ -853,12 +818,7 @@ func (a *app) models() ([]agent.Model, error) {
 	if ok {
 		return cached, nil
 	}
-	p, _ := a.registry.Get(name)
-	ml, ok := p.(agent.ModelLister)
-	if !ok {
-		return nil, errors.New("this provider cannot list models")
-	}
-	models, err := ml.ListModels(a.ctx)
+	models, err := a.client.ListModels(a.ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -902,39 +862,35 @@ func describeModel(m agent.Model) string {
 	return "  (" + strings.Join(parts, "; ") + ")"
 }
 
-// requestOf returns pending request n (1-based, in /pending order) or, for
-// n 0, the oldest one of type T.
-func requestOf[T agent.Request](a *app, n int) (T, error) {
+// requestOf returns the payload of pending request n (1-based, in
+// /pending order) or, for n 0, the oldest one of type T.
+func requestOf[T agent.EventPayload](a *app, n int) (T, error) {
 	var zero T
-	pending := a.session().PendingRequests()
+	pending, err := a.session().PendingRequests(a.ctx)
+	if err != nil {
+		return zero, err
+	}
 	if n > 0 {
 		r, ok := zero, false
 		if n <= len(pending) {
-			r, ok = pending[n-1].(T)
+			r, ok = pending[n-1].Payload.(T)
 		}
 		if !ok {
 			return zero, fmt.Errorf("no matching request %d; see /pending", n)
 		}
 		return r, nil
 	}
-	for _, r := range pending {
-		if r, ok := r.(T); ok {
+	for _, ev := range pending {
+		if r, ok := ev.Payload.(T); ok {
 			return r, nil
 		}
 	}
 	return zero, errors.New("no matching pending request")
 }
 
-func (a *app) supported(ok bool, iface string) bool {
-	if !ok {
-		a.printf("this session does not implement agent.%s\n", iface)
-	}
-	return ok
-}
-
 // answerQuestions answers req's questions in order from "|"-separated
 // answers. A number picks an option; commas separate several picks.
-func answerQuestions(ctx context.Context, req *agent.UserInputRequest, args string) error {
+func answerQuestions(ctx context.Context, sess *agent.Session, req agent.UserInputRequest, args string) error {
 	parts := strings.Split(args, "|")
 	if args == "" || len(parts) != len(req.Questions) {
 		return fmt.Errorf("give %d answers separated by |", len(req.Questions))
@@ -953,23 +909,23 @@ func answerQuestions(ctx context.Context, req *agent.UserInputRequest, args stri
 		}
 		answers[q.ID] = picked
 	}
-	return req.Answer(ctx, answers)
+	return sess.Answer(ctx, req.ID, answers)
 }
 
-func describeRequest(r agent.Request) string {
-	switch r := r.(type) {
-	case *agent.PermissionRequest:
+func describeRequest(ev agent.Event) string {
+	switch r := ev.Payload.(type) {
+	case agent.PermissionRequest:
 		return fmt.Sprintf("permission: %s %s%s", cmp.Or(r.Title, r.ToolName), oneLine(cmp.Or(r.Command, string(r.Input)), 100), subagentNote(r.SubagentID))
-	case *agent.UserInputRequest:
+	case agent.UserInputRequest:
 		texts := make([]string, 0, len(r.Questions))
 		for _, q := range r.Questions {
 			texts = append(texts, q.Text)
 		}
 		return fmt.Sprintf("question: %s%s", oneLine(strings.Join(texts, " | "), 120), subagentNote(r.SubagentID))
-	case *agent.ElicitationRequest:
+	case agent.ElicitationRequest:
 		return fmt.Sprintf("elicitation from %s: %s", r.Server, oneLine(r.Message, 100))
 	}
-	return fmt.Sprintf("%T", r)
+	return string(ev.Type)
 }
 
 // choose returns the name of the list entry a 1-based number arg picks,
@@ -1030,9 +986,4 @@ func leadingNumber(s string) (int, string) {
 		return n, strings.TrimSpace(rest)
 	}
 	return 0, s
-}
-
-func is[T any](sess agent.Session) bool {
-	_, ok := sess.(T)
-	return ok
 }

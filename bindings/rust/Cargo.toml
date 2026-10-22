@@ -1,0 +1,19 @@
+[package]
+name = "agent-cli-connector"
+version = "0.2.0"
+edition = "2024"
+description = "One API over coding-agent CLIs (Claude Code, Codex, Pi): Rust binding of the agent-cli-connector library."
+license = "MIT"
+links = "agent-cli-connector"
+
+[lib]
+name = "agent_cli_connector"
+
+[dependencies]
+futures-core = "0.3.34"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+tokio = { version = "1.54.1", features = ["rt", "sync", "macros", "time", "process", "io-util"] }
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }

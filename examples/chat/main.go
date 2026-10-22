@@ -1,10 +1,10 @@
 // Command chat is a terminal client for exploring every provider through
 // the uniform API.
 //
-//	go run ./examples/chat -provider claude
-//	go run ./examples/chat -provider codex -prompt "Summarize this repository" -yes
-//	go run ./examples/chat -provider pi
-//	go run ./examples/chat -provider opencode
+//	go run ./chat -provider claude          # from examples/
+//	go run ./chat -provider codex -prompt "Summarize this repository" -yes
+//	go run ./chat -provider pi -model openrouter/~deepseek/deepseek-flash-latest
+//	go run ./chat -providers fake -provider fake   # the scripted test harness
 //
 // Type a message to send it; input typed while a turn runs is queued. Lines
 // starting with "/" are commands: /help lists them, including images, files,
@@ -22,7 +22,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"os/signal"
 	"slices"
@@ -30,25 +29,21 @@ import (
 	"sync"
 	"sync/atomic"
 
-	agent "github.com/saanuregh/agent-cli-connector"
-	"github.com/saanuregh/agent-cli-connector/claude"
-	"github.com/saanuregh/agent-cli-connector/codex"
-	"github.com/saanuregh/agent-cli-connector/opencode"
-	"github.com/saanuregh/agent-cli-connector/pi"
+	agent "github.com/saanuregh/agent-cli-connector/bindings/go"
 )
 
 func main() {
-	providerName := flag.String("provider", "claude", "provider: claude, codex, pi, or opencode")
+	providerName := flag.String("provider", "claude", "provider: claude, codex, or pi")
+	providers := flag.String("providers", "", "comma-separated providers to offer, such as fake (default: every real harness)")
 	model := flag.String("model", "", "model to use")
 	effort := flag.String("effort", "", "reasoning effort, such as low or high")
-	mode := flag.String("mode", string(agent.PermissionDefault), "permission mode, such as default, acceptEdits, plan, or bypassPermissions")
+	mode := flag.String("mode", string(agent.PermissionModeDefault), "permission mode, such as default, accept_edits, plan, or bypass")
 	prompt := flag.String("prompt", "", "send one prompt, print the reply, and exit")
 	yes := flag.Bool("yes", false, "approve every tool call without asking")
 	cwd := flag.String("cwd", "", "working directory")
 	resume := flag.String("resume", "", "session ID to resume")
 	ephemeral := flag.Bool("ephemeral", false, "ask the harness not to persist the session")
 	events := flag.Bool("events", false, "print every event")
-	debug := flag.Bool("debug", false, "log harness stderr")
 	system := flag.String("system", "", "replace the system prompt")
 	appendSystem := flag.String("append-system", "", "append to the system prompt")
 	title := flag.String("title", "", "name the new session")
@@ -60,25 +55,40 @@ func main() {
 	strict := flag.Bool("strict", false, "fail to start when the harness cannot honor a setting")
 	buffer := flag.Int("buffer", 0, "keep at most this many unread events (0: no limit)")
 	schema := flag.String("schema", "", "JSON Schema file every turn's answer must match (Config.OutputSchema)")
-	wire := flag.String("wire", "", "write every protocol line to this file (- for stderr); /wire toggles")
+	wire := flag.String("wire", "", "capture every protocol line to this file (- for stderr); /wire toggles printing")
 	var mcp, dirs listFlag
 	flag.Var(&mcp, "mcp", "add an MCP server: name=command args... or name=https://url (repeatable)")
 	flag.Var(&dirs, "add-dir", "grant access to a directory outside the working directory (repeatable)")
 	flag.Parse()
 
+	var opts []agent.Option
+	if *providers != "" {
+		chosen := map[string]any{}
+		for _, name := range splitList(*providers) {
+			chosen[name] = nil
+		}
+		opts = append(opts, agent.WithProviders(chosen))
+	}
+	client, err := agent.Open(context.Background(), opts...)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "open:", err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
 	a := &app{
 		ctx:        context.Background(),
-		registry:   agent.NewRegistry(claude.New(claude.Options{}), codex.New(codex.Options{}), pi.New(pi.Options{}), opencode.New(opencode.Options{})),
+		client:     client,
 		provider:   *providerName,
 		verbose:    *events,
 		modelCache: map[string][]agent.Model{},
+		tools:      []agent.Tool{hostInfoTool()},
 		cfg: agent.Config{
 			Cwd:            *cwd,
 			Model:          *model,
 			Effort:         agent.Effort(*effort),
 			PermissionMode: agent.PermissionMode(*mode),
 			Ephemeral:      *ephemeral,
-			Tools:          []agent.Tool{hostInfoTool()},
 
 			SystemPrompt:          *system,
 			AppendSystemPrompt:    *appendSystem,
@@ -86,7 +96,7 @@ func main() {
 			DisallowedTools:       splitList(*denyTools),
 			AdditionalDirectories: dirs,
 			Strict:                *strict,
-			EventBufferLimit:      *buffer,
+			EventBufferLimit:      int64(*buffer),
 		},
 	}
 	servers, err := parseMCP(mcp)
@@ -94,12 +104,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	a.cfg.MCPServers = servers
+	a.cfg.McpServers = servers
 	if err := a.setWire(*wire); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	a.cfg.WireTap = a.tap
+	// Wire events are produced only when asked for at start.
+	a.cfg.WireTap = *wire != ""
 	if *schema != "" {
 		data, err := os.ReadFile(*schema)
 		if err != nil {
@@ -108,19 +119,16 @@ func main() {
 		}
 		a.cfg.OutputSchema = data
 	}
-	if *debug {
-		a.cfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	}
 	if *yes {
-		a.cfg.Handlers.Permission = func(context.Context, *agent.PermissionRequest) agent.PermissionResponse {
-			return agent.PermissionResponse{Decision: agent.DecisionAllow}
+		a.handlers.Permission = func(context.Context, *agent.PermissionRequest) agent.PermissionResponse {
+			return agent.PermissionResponse{Decision: agent.PermissionDecisionAllow}
 		}
 	}
 
 	// These describe only the first session; /new and /provider start
 	// plain ones.
 	start := a.cfg
-	start.Resume, start.Fork, start.ForkAtTurn = *resume, *fork, *forkAt
+	start.ResumeID, start.Fork, start.ForkAtTurn = *resume, *fork, *forkAt
 	start.Title, start.SessionID = *title, *sessionID
 	if err := a.start(a.provider, start); err != nil {
 		fmt.Fprintln(os.Stderr, "start:", err)
@@ -147,14 +155,16 @@ func main() {
 // app is the chat state: the active session and what its events reported.
 type app struct {
 	ctx      context.Context
-	registry *agent.Registry
+	client   *agent.Client
 	cfg      agent.Config
+	tools    []agent.Tool
+	handlers agent.Handlers
 
 	mu         sync.Mutex
 	provider   string
-	sess       agent.Session
+	sess       *agent.Session
 	rendered   chan struct{} // closed when the active session's events end
-	transcript *agent.Transcript
+	items      []agent.Item  // completed transcript items, oldest first
 	tasks      map[string]agent.Task
 	turns      []*sentTurn
 	usage      agent.Usage
@@ -173,18 +183,17 @@ type sentTurn struct {
 	turn   *agent.Turn
 }
 
-func (a *app) session() agent.Session {
+func (a *app) session() *agent.Session {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.sess
 }
 
-// active returns the active provider's name, the provider, and the session.
-func (a *app) active() (string, agent.Provider, agent.Session) {
+// active returns the active provider's name and the session.
+func (a *app) active() (string, *agent.Session) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	p, _ := a.registry.Get(a.provider)
-	return a.provider, p, a.sess
+	return a.provider, a.sess
 }
 
 // busy reports whether a turn sent on the active session still runs.
@@ -204,7 +213,7 @@ func (a *app) busy() bool {
 // start starts a session on provider and makes it the active one, closing
 // the previous one.
 func (a *app) start(provider string, cfg agent.Config) error {
-	sess, err := a.registry.Start(a.ctx, provider, cfg)
+	sess, err := a.client.Start(a.ctx, provider, cfg, agent.WithTools(a.tools...), agent.WithHandlers(a.handlers))
 	if err != nil {
 		return err
 	}
@@ -213,12 +222,12 @@ func (a *app) start(provider string, cfg agent.Config) error {
 }
 
 // attach makes sess the active session and renders its events.
-func (a *app) attach(provider string, sess agent.Session) {
+func (a *app) attach(provider string, sess *agent.Session) {
 	a.mu.Lock()
 	old := a.sess
 	a.provider, a.sess = provider, sess
 	a.rendered = make(chan struct{})
-	a.transcript = &agent.Transcript{}
+	a.items = nil
 	a.tasks = map[string]agent.Task{}
 	a.turns = nil
 	a.usage = agent.Usage{}
@@ -233,7 +242,7 @@ func (a *app) attach(provider string, sess agent.Session) {
 	}()
 }
 
-// setWire opens the -wire destination and turns the tap on.
+// setWire opens the -wire destination and turns printing on.
 func (a *app) setWire(path string) error {
 	switch path {
 	case "":
@@ -250,21 +259,20 @@ func (a *app) setWire(path string) error {
 	return nil
 }
 
-// tap receives every protocol line. It runs on the session's I/O
-// goroutine, so it only writes.
-func (a *app) tap(dir agent.WireDirection, line []byte) {
+// tap prints one protocol line from a wire event.
+func (a *app) tap(dir agent.WireDirection, line string) {
 	if !a.wireOn.Load() {
 		return
 	}
 	arrow := "<<"
-	if dir == agent.WireSend {
+	if dir == agent.WireDirectionSend {
 		arrow = ">>"
 	}
 	if a.wireOut != nil {
 		fmt.Fprintf(a.wireOut, "%s %s\n", arrow, line)
 		return
 	}
-	a.printf("\n%s %s\n", arrow, oneLine(string(line), 300))
+	a.printf("\n%s %s\n", arrow, oneLine(line, 300))
 }
 
 // waitTurns waits for the turns still running, so piped input gets its
@@ -366,7 +374,7 @@ func (a *app) send(in agent.Input, prompt string) {
 // permissionPending reports whether y and n answer a permission request
 // rather than being sent as messages.
 func (a *app) permissionPending() bool {
-	_, err := requestOf[*agent.PermissionRequest](a, 0)
+	_, err := requestOf[agent.PermissionRequest](a, 0)
 	return err == nil
 }
 
@@ -404,11 +412,11 @@ func splitList(s string) []string {
 
 // parseMCP reads -mcp values: name=https://url for an HTTP server, or
 // name=command args... for a stdio one.
-func parseMCP(specs []string) (map[string]agent.MCPServer, error) {
+func parseMCP(specs []string) (map[string]agent.McpServer, error) {
 	if len(specs) == 0 {
 		return nil, nil
 	}
-	servers := map[string]agent.MCPServer{}
+	servers := map[string]agent.McpServer{}
 	for _, spec := range specs {
 		name, target, ok := strings.Cut(spec, "=")
 		fields := strings.Fields(target)
@@ -416,9 +424,9 @@ func parseMCP(specs []string) (map[string]agent.MCPServer, error) {
 			return nil, fmt.Errorf("-mcp %q: want name=command args... or name=https://url", spec)
 		}
 		if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
-			servers[name] = agent.HTTPServer(target)
+			servers[name] = agent.McpServer{Transport: agent.McpTransportHTTP, URL: target}
 		} else {
-			servers[name] = agent.StdioServer(fields[0], fields[1:]...)
+			servers[name] = agent.McpServer{Transport: agent.McpTransportStdio, Command: fields[0], Args: fields[1:]}
 		}
 	}
 	return servers, nil

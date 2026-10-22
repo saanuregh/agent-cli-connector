@@ -3,7 +3,8 @@
 // Sessions outlive the connections that use them: a client can disconnect,
 // come back, replay what it missed, and answer requests that waited.
 //
-//	go run ./examples/daemon -addr 127.0.0.1:8080
+//	go run ./daemon -addr 127.0.0.1:8080              # from examples/
+//	go run ./daemon -providers fake                   # the scripted test harness
 //
 //	# it prints a token at startup; every request must carry it
 //	TOKEN=...
@@ -49,16 +50,13 @@ import (
 	"sync"
 	"time"
 
-	agent "github.com/saanuregh/agent-cli-connector"
-	"github.com/saanuregh/agent-cli-connector/claude"
-	"github.com/saanuregh/agent-cli-connector/codex"
-	"github.com/saanuregh/agent-cli-connector/opencode"
-	"github.com/saanuregh/agent-cli-connector/pi"
+	agent "github.com/saanuregh/agent-cli-connector/bindings/go"
 )
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "listen address")
 	keep := flag.Int("keep", 1000, "events kept per session for clients that reconnect")
+	providers := flag.String("providers", "", "comma-separated providers to offer (default: every real harness)")
 	flag.Parse()
 
 	// Cancelling root ends every request, including open event streams,
@@ -75,8 +73,21 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	var opts []agent.Option
+	if *providers != "" {
+		chosen := map[string]any{}
+		for _, name := range strings.Split(*providers, ",") {
+			chosen[strings.TrimSpace(name)] = nil
+		}
+		opts = append(opts, agent.WithProviders(chosen))
+	}
+	client, err := agent.Open(root, opts...)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.Close()
 	d := &daemon{
-		registry: agent.NewRegistry(claude.New(claude.Options{}), codex.New(codex.Options{}), pi.New(pi.Options{}), opencode.New(opencode.Options{})),
+		client:   client,
 		sessions: map[string]*hosted{},
 		keep:     *keep,
 		token:    rand.Text(),
@@ -101,10 +112,10 @@ func main() {
 }
 
 type daemon struct {
-	registry *agent.Registry
-	keep     int
-	token    string
-	hosts    map[string]bool // Host header values accepted
+	client *agent.Client
+	keep   int
+	token  string
+	hosts  map[string]bool // Host header values accepted
 
 	mu       sync.Mutex
 	sessions map[string]*hosted
@@ -180,20 +191,18 @@ func (d *daemon) providers(w http.ResponseWriter, r *http.Request) {
 		Status *agent.ProviderStatus `json:",omitempty"`
 		Error  string                `json:",omitempty"`
 	}
-	names := d.registry.Names()
-	out := make([]status, len(names))
+	providers := d.client.Providers()
+	out := make([]status, len(providers))
 	var wg sync.WaitGroup
-	for i, name := range names {
-		out[i].Name = name
-		p, _ := d.registry.Get(name)
-		checker, ok := p.(agent.Checker)
-		if !ok {
+	for i, p := range providers {
+		out[i].Name = p.Name
+		if !p.Capabilities.Check {
 			continue
 		}
 		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 			defer cancel()
-			st, err := checker.Check(ctx)
+			st, err := d.client.Check(ctx, p.Name)
 			if err != nil {
 				out[i].Error = err.Error()
 			}
@@ -234,12 +243,12 @@ func (d *daemon) start(w http.ResponseWriter, r *http.Request) {
 	// The session outlives this request, so it must not use its context.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Minute)
 	defer cancel()
-	sess, err := d.registry.Start(ctx, body.Provider, agent.Config{
+	sess, err := d.client.Start(ctx, body.Provider, agent.Config{
 		Model:          body.Model,
 		Effort:         body.Effort,
 		PermissionMode: body.Mode,
 		Cwd:            body.Cwd,
-		Resume:         body.Resume,
+		ResumeID:       body.Resume,
 		Ephemeral:      body.Ephemeral,
 		Title:          body.Title,
 	})
@@ -247,9 +256,9 @@ func (d *daemon) start(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusBadRequest, errorBody(err))
 		return
 	}
-	// The ID can change later, such as after a /clear, so the key is fixed
-	// now.
-	id := sess.ID()
+	// The native ID can change later, such as after a /clear; the
+	// library's handle does not.
+	id := sess.Handle()
 	h := &hosted{sess: sess, keep: d.keep, changed: make(chan struct{})}
 	d.mu.Lock()
 	d.sessions[id] = h
@@ -331,9 +340,14 @@ func (d *daemon) interrupt(w http.ResponseWriter, r *http.Request, h *hosted) {
 
 // requests lists the requests waiting for an answer, so a client that
 // connects late sees what the agent is blocked on.
-func (d *daemon) requests(w http.ResponseWriter, _ *http.Request, h *hosted) {
+func (d *daemon) requests(w http.ResponseWriter, r *http.Request, h *hosted) {
+	pending, err := h.sess.PendingRequests(r.Context())
+	if err != nil {
+		reply(w, http.StatusBadRequest, errorBody(err))
+		return
+	}
 	out := []json.RawMessage{}
-	for _, req := range h.sess.PendingRequests() {
+	for _, req := range pending {
 		out = append(out, encodeEvent(req))
 	}
 	reply(w, http.StatusOK, out)
@@ -346,35 +360,43 @@ func (d *daemon) requests(w http.ResponseWriter, _ *http.Request, h *hosted) {
 //	elicitation: {"action":"accept|decline|cancel","content":{...}}
 func (d *daemon) answer(w http.ResponseWriter, r *http.Request, h *hosted) {
 	var body struct {
-		Decision agent.PermissionDecision `json:"decision"`
-		Message  string                   `json:"message"`
-		Answers  map[string][]string      `json:"answers"`
-		Action   agent.ElicitationAction  `json:"action"`
-		Content  json.RawMessage          `json:"content"`
+		Decision agent.PermissionDecision        `json:"decision"`
+		Message  string                          `json:"message"`
+		Answers  map[string][]string             `json:"answers"`
+		Action   agent.ElicitationResponseAction `json:"action"`
+		Content  json.RawMessage                 `json:"content"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
-	var req agent.Request
-	for _, p := range h.sess.PendingRequests() {
-		if p.RequestID() == r.PathValue("rid") {
-			req = p
+	pending, err := h.sess.PendingRequests(r.Context())
+	if err != nil {
+		reply(w, http.StatusBadRequest, errorBody(err))
+		return
+	}
+	rid := r.PathValue("rid")
+	var resp agent.Response
+	for _, ev := range pending {
+		switch req := ev.Payload.(type) {
+		case agent.PermissionRequest:
+			if req.ID == rid {
+				resp = agent.PermissionResponse{Decision: body.Decision, Message: body.Message}
+			}
+		case agent.UserInputRequest:
+			if req.ID == rid {
+				resp = agent.UserInputResponse{Answers: body.Answers, Cancelled: body.Answers == nil}
+			}
+		case agent.ElicitationRequest:
+			if req.ID == rid {
+				resp = agent.ElicitationResponse{Action: body.Action, Content: body.Content}
+			}
 		}
 	}
-	if req == nil {
+	if resp == nil {
 		reply(w, http.StatusNotFound, map[string]string{"error": "no such pending request"})
 		return
 	}
-	var err error
-	switch req := req.(type) {
-	case *agent.PermissionRequest:
-		err = req.Respond(r.Context(), agent.PermissionResponse{Decision: body.Decision, Message: body.Message})
-	case *agent.UserInputRequest:
-		err = req.Respond(r.Context(), agent.UserInputResponse{Answers: body.Answers, Cancelled: body.Answers == nil})
-	case *agent.ElicitationRequest:
-		err = req.Respond(r.Context(), agent.ElicitationResponse{Action: body.Action, Content: body.Content})
-	}
-	if err != nil {
+	if err := h.sess.Respond(r.Context(), rid, resp); err != nil {
 		reply(w, http.StatusBadRequest, errorBody(err))
 		return
 	}
@@ -423,7 +445,7 @@ func (d *daemon) closeAll() {
 
 // hosted is a running session and the recent events kept for clients.
 type hosted struct {
-	sess agent.Session
+	sess *agent.Session
 	keep int
 
 	mu      sync.Mutex
@@ -443,7 +465,7 @@ type recorded struct {
 // so the session never buffers events without limit.
 func (h *hosted) record() {
 	for ev := range h.sess.Events() {
-		kind, data := agent.EventType(ev), encodeEvent(ev)
+		kind, data := string(ev.Type), encodeEvent(ev)
 		h.mu.Lock()
 		h.seq++
 		h.log = append(h.log, recorded{seq: h.seq, kind: kind, data: data})
@@ -477,20 +499,11 @@ func (h *hosted) since(seq int) ([]recorded, <-chan struct{}, bool) {
 // encodeEvent marshals an event without its native payload, which can be
 // large and differs per harness.
 func encodeEvent(ev agent.Event) json.RawMessage {
+	ev.Raw = nil
 	data, err := json.Marshal(ev)
 	if err != nil {
 		return errorJSON(err)
 	}
-	// Only the top level is decoded; field values stay as encoded.
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return errorJSON(err)
-	}
-	if _, native := ev.(*agent.RawEvent); !native {
-		delete(fields, "Raw")
-	}
-	fields["Type"], _ = json.Marshal(agent.EventType(ev))
-	data, _ = json.Marshal(fields)
 	return data
 }
 

@@ -1,5 +1,6 @@
-# Example binaries built at the repository root with `go build ./examples/...`.
+# Zig build output and cache.
+/zig-out/
+/.zig-cache/
+# Old Go example binary, built at the repository root.
 /chat
-/daemon
-/oneshot
-/orchestrator
+node_modules/
