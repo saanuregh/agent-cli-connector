@@ -27,7 +27,7 @@ import type {
   UserInputResponse,
 } from "./protocol.ts";
 import { ClientMethods, SessionMethods } from "./methods.ts";
-import { AgentdTransport, NativeTransport, type AgentdOptions, type Transport } from "./transport.ts";
+import { AgentdTransport, NativeTransport, resolveAgentdPath, resolveLibraryPath, type AgentdOptions, type Transport } from "./transport.ts";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -209,9 +209,9 @@ export interface ClientOptions {
   transport?: "native" | "agentd" | Transport;
   /** Providers to offer, by name, with their options. Omitted offers every real harness. */
   providers?: Record<string, unknown>;
-  /** The shared library for the native transport; defaults to `AGENT_CLI_CONNECTOR_LIB` or this repository's build. */
+  /** The shared library for the native transport; defaults to `AGENT_CLI_CONNECTOR_LIB`, this repository's build, or the downloaded release. */
   libraryPath?: string;
-  /** Options for the agentd transport; the path defaults to `AGENTD_PATH` or this repository's build. */
+  /** Options for the agentd transport; the path defaults to `AGENTD_PATH`, this repository's build, `PATH`, or the downloaded release. */
   agentd?: AgentdOptions;
 }
 
@@ -235,7 +235,11 @@ export class Client extends ClientMethods {
   static async open(options: ClientOptions = {}): Promise<Client> {
     const t = options.transport ?? "native";
     const transport =
-      t === "native" ? new NativeTransport(options.libraryPath) : t === "agentd" ? new AgentdTransport(options.agentd) : t;
+      t === "native"
+        ? new NativeTransport(options.libraryPath ?? (await resolveLibraryPath()))
+        : t === "agentd"
+          ? new AgentdTransport({ ...options.agentd, path: options.agentd?.path ?? (await resolveAgentdPath()) })
+          : t;
     const client = new Client(transport);
     transport.start(
       (text) => client.#receive(text),

@@ -5,25 +5,30 @@
 //	sess, err := client.Start(ctx, "claude", agent.Config{Cwd: dir})
 //	res, err := sess.Run(ctx, agent.Text("Add a test for parseConfig"))
 //
-// A [Client] is one connection to the native library, linked statically
-// through cgo. It offers providers ([Client.Check], [Client.ListModels],
+// A [Client] is one connection to the native library, loaded at run time
+// without cgo. It offers providers ([Client.Check], [Client.ListModels],
 // ...) and starts [Session] values. A session streams [Event] values on
 // [Session.Events] and runs turns ([Session.Send] returns a [Turn]).
 // Permission, question, and elicitation requests arrive as events and are
 // answered with [Session.Respond] and its helpers, or by [Handlers]. Host
 // tools ([NewTool]) are Go functions the model can call.
 //
-// # Building
+// # Native library
 //
-// Build the native library first, from the repository root:
+// The first [Open] finds the shared library, in this order:
+//
+//  1. the path in AGENT_CLI_CONNECTOR_LIB;
+//  2. the user cache directory, under
+//     agent-cli-connector/<LibraryVersion>/<platform>/;
+//  3. a download of the GitHub release v<LibraryVersion> into that cache,
+//     checked against the release's SHA256SUMS.
+//
+// AGENT_CLI_CONNECTOR_NO_DOWNLOAD=1 turns the download off, and
+// AGENT_CLI_CONNECTOR_RELEASE_URL replaces the release URL. To use a
+// library built from this repository:
 //
 //	zig build -Doptimize=ReleaseFast
-//
-// cgo links zig-out/lib/libagent-cli-connector.a of this repository. To
-// link a library elsewhere, put its directory first on the linker path,
-// since cgo directives cannot read environment variables:
-//
-//	CGO_LDFLAGS="-L$AGENT_CLI_CONNECTOR_LIB_DIR" go build ./...
+//	export AGENT_CLI_CONNECTOR_LIB=$PWD/zig-out/lib/libagent-cli-connector.so
 package agent
 
 import (

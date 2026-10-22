@@ -2,6 +2,16 @@ const std = @import("std");
 
 const providers = [_][]const u8{ "claude", "codex", "pi" };
 
+/// The platforms release files are built for. Bindings download the files
+/// for their platform by these names (`<file>-<name>.<ext>`).
+const release_platforms = [_]struct { name: []const u8, zig_target: []const u8 }{
+    .{ .name = "linux-x86_64", .zig_target = "x86_64-linux-gnu.2.28" },
+    .{ .name = "linux-aarch64", .zig_target = "aarch64-linux-gnu.2.28" },
+    .{ .name = "macos-x86_64", .zig_target = "x86_64-macos" },
+    .{ .name = "macos-aarch64", .zig_target = "aarch64-macos" },
+    .{ .name = "windows-x86_64", .zig_target = "x86_64-windows-gnu" },
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -88,6 +98,15 @@ pub fn build(b: *std.Build) void {
     update_bindings.addCopyFileToSource(generated.path(b, "methods.rs"), "bindings/rust/src/methods.rs");
     b.step("bindgen", "Generate the binding types from the protocol types").dependOn(&update_bindings.step);
 
+    // `zig build release`: the libraries, agentd, and header for every
+    // platform the bindings download, in zig-out/release.
+    const release = b.step("release", "Build the release files for every platform into zig-out/release");
+    release.dependOn(&b.addInstallFileWithDir(b.path("include/agent.h"), .{ .custom = "release" }, "agent.h").step);
+    for (release_platforms) |platform| {
+        const query = std.Target.Query.parse(.{ .arch_os_abi = platform.zig_target }) catch @panic("bad release target");
+        addReleaseFiles(b, release, b.resolveTargetQuery(query), platform.name);
+    }
+
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = c_api })).step);
     const core_tests = b.addRunArtifact(b.addTest(.{ .root_module = agent }));
@@ -109,5 +128,66 @@ pub fn build(b: *std.Build) void {
         const run = b.addRunArtifact(b.addTest(.{ .root_module = mod }));
         b.step("test-" ++ name, "Run the " ++ name ++ " provider tests").dependOn(&run.step);
         if (on) test_step.dependOn(&run.step);
+    }
+}
+
+/// One platform's release files: the shared and static libraries and
+/// agentd, built with every provider.
+fn addReleaseFiles(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTarget, platform: []const u8) void {
+    const optimize: std.builtin.OptimizeMode = .ReleaseFast;
+    const agent = b.createModule(.{ .root_source_file = b.path("src/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    inline for (providers) |name| {
+        const mod = b.createModule(.{
+            .root_source_file = b.path("src/providers/" ++ name ++ "/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        mod.addImport("agent", agent);
+        agent.addImport(name, mod);
+    }
+    const c_api = b.createModule(.{
+        .root_source_file = b.path("src/c_api.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = true,
+        .link_libc = true,
+        .imports = &.{.{ .name = "agent", .module = agent }},
+    });
+    const static_lib = b.addLibrary(.{ .name = "agent-cli-connector", .linkage = .static, .root_module = c_api });
+    static_lib.bundle_compiler_rt = true;
+    const shared_lib = b.addLibrary(.{ .name = "agent-cli-connector", .linkage = .dynamic, .root_module = c_api });
+    const agentd = b.addExecutable(.{
+        .name = "agentd",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/agentd.zig"),
+            .target = target,
+            .optimize = optimize,
+            .strip = true,
+            .link_libc = true,
+            .imports = &.{.{ .name = "agent", .module = agent }},
+        }),
+    });
+
+    const os = target.result.os.tag;
+    const lib_prefix = if (os == .windows) "" else "lib";
+    const shared_ext = switch (os) {
+        .windows => "dll",
+        .macos => "dylib",
+        else => "so",
+    };
+    const files = [_]struct { artifact: *std.Build.Step.Compile, name: []const u8 }{
+        .{ .artifact = shared_lib, .name = b.fmt("{s}agent-cli-connector-{s}.{s}", .{ lib_prefix, platform, shared_ext }) },
+        .{ .artifact = static_lib, .name = b.fmt("{s}agent-cli-connector-{s}.{s}", .{ lib_prefix, platform, if (os == .windows) "lib" else "a" }) },
+        .{ .artifact = agentd, .name = b.fmt("agentd-{s}{s}", .{ platform, if (os == .windows) ".exe" else "" }) },
+    };
+    for (files) |f| {
+        step.dependOn(&b.addInstallArtifact(f.artifact, .{
+            .dest_dir = .{ .override = .{ .custom = "release" } },
+            .dest_sub_path = f.name,
+            .implib_dir = .disabled,
+            .pdb_dir = .disabled,
+            .h_dir = .disabled,
+        }).step);
     }
 }

@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import koffi, { type LibraryHandle } from "koffi";
+import { agentdFile, cachedPath, fetchPrebuilt, findOnPath, sharedLibraryFile } from "./prebuilt.ts";
 
 type KoffiFunction = ReturnType<LibraryHandle["func"]>;
 
@@ -33,26 +34,45 @@ interface NativeLibrary {
 
 const loaded = new Map<string, NativeLibrary>();
 
-/** The shared library: `AGENT_CLI_CONNECTOR_LIB`, else this repository's `zig-out`. */
-export function defaultLibraryPath(): string {
-  const fromEnv = process.env.AGENT_CLI_CONNECTOR_LIB;
-  if (fromEnv) return fromEnv;
+function localLibraryPath(): string | undefined {
   const candidates =
     process.platform === "win32"
       ? ["zig-out/bin/agent-cli-connector.dll", "zig-out/lib/agent-cli-connector.dll"]
       : process.platform === "darwin"
         ? ["zig-out/lib/libagent-cli-connector.dylib"]
         : ["zig-out/lib/libagent-cli-connector.so"];
-  const paths = candidates.map((c) => repoRoot + c);
-  return paths.find((p) => existsSync(p)) ?? paths[0]!;
+  return candidates.map((c) => repoRoot + c).find((p) => existsSync(p));
 }
 
-/** The agentd executable: `AGENTD_PATH`, else this repository's `zig-out/bin`, else `agentd` on PATH. */
-export function defaultAgentdPath(): string {
-  const fromEnv = process.env.AGENTD_PATH;
-  if (fromEnv) return fromEnv;
+function localAgentdPath(): string | undefined {
   const local = repoRoot + (process.platform === "win32" ? "zig-out/bin/agentd.exe" : "zig-out/bin/agentd");
-  return existsSync(local) ? local : "agentd";
+  return existsSync(local) ? local : findOnPath("agentd");
+}
+
+/**
+ * The shared library: `AGENT_CLI_CONNECTOR_LIB`, else this repository's `zig-out`, else the release cache.
+ * Does not download; `resolveLibraryPath` does.
+ */
+export function defaultLibraryPath(): string {
+  return process.env.AGENT_CLI_CONNECTOR_LIB || localLibraryPath() || cachedPath(sharedLibraryFile) || repoRoot + "zig-out/lib/libagent-cli-connector.so";
+}
+
+/**
+ * The agentd executable: `AGENTD_PATH`, else this repository's `zig-out/bin`, else `agentd` on PATH,
+ * else the release cache. Does not download; `resolveAgentdPath` does.
+ */
+export function defaultAgentdPath(): string {
+  return process.env.AGENTD_PATH || localAgentdPath() || cachedPath(agentdFile) || "agentd";
+}
+
+/** Like `defaultLibraryPath`, but downloads the release's library into the cache when nothing local is found. */
+export async function resolveLibraryPath(): Promise<string> {
+  return process.env.AGENT_CLI_CONNECTOR_LIB || localLibraryPath() || fetchPrebuilt(sharedLibraryFile);
+}
+
+/** Like `defaultAgentdPath`, but downloads the release's agentd into the cache when nothing local is found. */
+export async function resolveAgentdPath(): Promise<string> {
+  return process.env.AGENTD_PATH || localAgentdPath() || fetchPrebuilt(agentdFile);
 }
 
 function loadLibrary(path: string): NativeLibrary {

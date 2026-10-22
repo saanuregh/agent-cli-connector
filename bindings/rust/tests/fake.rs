@@ -141,7 +141,17 @@ async fn host_tool_answers_tool_calls() {
 
 #[tokio::test]
 async fn agentd_subprocess_runs_a_turn() {
-    let agentd = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zig-out/bin/agentd");
+    // agentd comes from AGENTD_PATH or a repository build; the library itself
+    // may have been downloaded, which brings no agentd.
+    let agentd = std::env::var_os("AGENTD_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../zig-out/bin/agentd")
+        });
+    if !agentd.exists() {
+        eprintln!("skipped: no agentd at {}", agentd.display());
+        return;
+    }
     let client = Client::open(fake().agentd(agentd)).await.unwrap();
     assert_eq!(client.providers()[0].name, "fake");
     let session = client.start("fake", Config::default()).await.unwrap();
@@ -263,4 +273,13 @@ async fn futures_are_send_and_spawnable() {
         Ok::<_, agent_cli_connector::Error>(text)
     });
     assert_eq!(task.await.unwrap().unwrap(), "from a task");
+}
+
+#[test]
+fn crate_version_names_the_release_it_downloads() {
+    // build.rs downloads the release for CARGO_PKG_VERSION.
+    assert_eq!(
+        env!("CARGO_PKG_VERSION"),
+        agent_cli_connector::LIBRARY_VERSION
+    );
 }

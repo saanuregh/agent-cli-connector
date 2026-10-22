@@ -1,0 +1,38 @@
+name: release
+
+# Pushing a tag v<version> builds the library, agentd, and header for every
+# platform the bindings download (build.zig `release_platforms`) and attaches
+# them, with SHA256SUMS, to a GitHub release for that tag.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  ZIG_VERSION: 0.17.0
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      # The bindings download the release named after the version they were
+      # generated from, so the tag must match it.
+      - name: tag matches the library version
+        run: |
+          version=$(sed -n 's/^pub const library_version = "\(.*\)";/\1/p' src/rpc.zig)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME does not match library_version $version"; exit 1; }
+      - name: build
+        run: zig build release
+      - name: checksums
+        working-directory: zig-out/release
+        run: sha256sum * > SHA256SUMS
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" zig-out/release/* --title "$GITHUB_REF_NAME" --generate-notes

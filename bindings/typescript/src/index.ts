@@ -18,12 +18,14 @@ export {
   type UserInputRequestHelpers,
   type WaitOptions,
 } from "./client.ts";
-export { Effort, PermissionMode } from "./protocol.ts";
+export { Effort, LIBRARY_VERSION, PermissionMode } from "./protocol.ts";
 export {
   AgentdTransport,
   NativeTransport,
   defaultAgentdPath,
   defaultLibraryPath,
+  resolveAgentdPath,
+  resolveLibraryPath,
   type AgentdOptions,
   type Transport,
 } from "./transport.ts";

@@ -61,14 +61,31 @@ servers (`flake.nix`).
 zig build -Doptimize=ReleaseFast     # zig-out/lib (static + shared), zig-out/include/agent.h, zig-out/bin/agentd
 zig build test                       # tests with scripted fake harnesses; no CLI or tokens needed
 zig build -Dproviders=claude,pi      # leave providers out
+zig build release                    # every platform's files into zig-out/release
 ```
+
+### Prebuilt libraries
+
+The bindings do not need a local Zig build: they fetch the library from the GitHub release for their version
+(`v0.2.0` for 0.2.0), into the user cache, and check it against the release's `SHA256SUMS`. Releases carry the shared
+and static library and `agentd` for `linux-x86_64`, `linux-aarch64` (glibc 2.28 or newer), `macos-x86_64`,
+`macos-aarch64`, and `windows-x86_64`. Pushing a tag `v<version>` that matches `library_version` builds and
+publishes them (`.github/workflows/release.yml`).
+
+| Variable | Effect |
+| --- | --- |
+| `AGENT_CLI_CONNECTOR_LIB` | Shared library to load (Go, TypeScript). |
+| `AGENT_CLI_CONNECTOR_LIB_DIR` | Directory with the static library to link (Rust). |
+| `AGENTD_PATH` | `agentd` executable (TypeScript, Rust tests). |
+| `AGENT_CLI_CONNECTOR_RELEASE_URL` | Base URL to download from instead of the GitHub release, such as a mirror. |
+| `AGENT_CLI_CONNECTOR_NO_DOWNLOAD=1` | Never download; fail with what to set instead. |
 
 | Language | Package | Links |
 | --- | --- | --- |
 | Zig | `build.zig.zon` dependency, module `agent` | from source |
-| Go | `bindings/go` (`github.com/saanuregh/agent-cli-connector/bindings/go`) | `zig-out/lib/libagent-cli-connector.a` through cgo; override with `CGO_LDFLAGS=-L<dir>` |
-| Rust | `bindings/rust` (crate `agent-cli-connector`) | the static library from `AGENT_CLI_CONNECTOR_LIB_DIR` or `zig-out/lib` |
-| TypeScript | `bindings/typescript` (package `agent-cli-connector`, Node 24) | the shared library through `koffi` (`AGENT_CLI_CONNECTOR_LIB`), or the `agentd` subprocess |
+| Go | `bindings/go` (`github.com/saanuregh/agent-cli-connector/bindings/go`) | the shared library through purego, without cgo: `AGENT_CLI_CONNECTOR_LIB`, else the user cache, else a download from the matching GitHub release checked against `SHA256SUMS` (`AGENT_CLI_CONNECTOR_NO_DOWNLOAD=1` turns it off) |
+| Rust | `bindings/rust` (crate `agent-cli-connector`) | the static library from `AGENT_CLI_CONNECTOR_LIB_DIR`, then `zig-out/lib`, then `zig build` when Zig is on `PATH` in a repository checkout, then a download from the GitHub release for the crate version, checked against `SHA256SUMS` (`AGENT_CLI_CONNECTOR_RELEASE_URL` replaces the base URL; `AGENT_CLI_CONNECTOR_NO_DOWNLOAD=1` turns it off) |
+| TypeScript | `bindings/typescript` (package `agent-cli-connector`, Node 24) | the shared library through `koffi` (`AGENT_CLI_CONNECTOR_LIB`), or the `agentd` subprocess (`AGENTD_PATH`); without a local build, `Client.open` downloads both from the matching GitHub release into the user cache, checked against `SHA256SUMS` (`AGENT_CLI_CONNECTOR_NO_DOWNLOAD=1` turns this off) |
 
 Any other language can load the shared library (`include/agent.h`) or run `agentd`, which speaks the same protocol
 over standard input and output, one JSON message per line.

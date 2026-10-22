@@ -31,9 +31,10 @@ jobs:
       - name: generated bindings are current
         if: runner.os == 'Linux'
         run: zig build bindgen && git diff --exit-code schema bindings/go/protocol.go bindings/go/methods.go bindings/rust/src/protocol.rs bindings/rust/src/methods.rs bindings/typescript/src/protocol.ts bindings/typescript/src/methods.ts
-      - name: windows builds
+      # Every platform the bindings download from a release.
+      - name: release builds
         if: runner.os == 'Linux'
-        run: zig build -Dtarget=x86_64-windows
+        run: zig build release
 
   go:
     runs-on: ubuntu-latest
