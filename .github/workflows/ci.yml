@@ -70,11 +70,15 @@ jobs:
           install: mingw-w64-ucrt-x86_64-gcc
       - if: runner.os == 'Windows'
         run: printf '%s\n' '${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin' >> "$GITHUB_PATH"
-      # zig build go-libs runs llvm-objcopy (build.zig localizeLibcSymbols),
-      # which build.zig also looks for in Homebrew's llvm. The Windows image
-      # ships LLVM.
+      # zig build go-libs runs llvm-objcopy 20 or later (build.zig
+      # localizeLibcSymbols), which build.zig also looks for in Homebrew's
+      # llvm. Ubuntu's llvm is 18, so Linux takes LLVM's own packages. The
+      # Windows image ships a recent LLVM.
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y llvm
+        run: |
+          wget -qO "$RUNNER_TEMP/llvm.sh" https://apt.llvm.org/llvm.sh
+          sudo bash "$RUNNER_TEMP/llvm.sh" 21
+          echo /usr/lib/llvm-21/bin >> "$GITHUB_PATH"
       - if: runner.os == 'macOS'
         run: brew install llvm
       # The committed libraries are what Go users link: their version must be
