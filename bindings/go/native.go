@@ -6,7 +6,8 @@ import (
 )
 
 // The backends: native_static.go calls the static library linked in with
-// cgo; native_purego.go loads the shared library at run time without cgo.
+// cgo; native_purego.go loads the shared library at run time without cgo,
+// through internal/sharedlib.
 // Each provides connectionPointer, loadLibrary, and the agent* functions of
 // include/agent.h used below.
 

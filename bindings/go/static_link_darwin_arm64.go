@@ -1,4 +1,4 @@
-//go:build cgo && !agent_use_lib && darwin && arm64
+//go:build cgo && !agent_use_lib
 
 package agent
 

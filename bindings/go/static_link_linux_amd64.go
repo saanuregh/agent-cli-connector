@@ -1,4 +1,4 @@
-//go:build cgo && !agent_use_lib && linux && amd64
+//go:build cgo && !agent_use_lib && !android
 
 package agent
 

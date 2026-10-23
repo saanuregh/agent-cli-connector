@@ -1,6 +1,4 @@
-//go:build !(cgo && !agent_use_lib && ((linux && (amd64 || arm64)) || (darwin && (amd64 || arm64)) || (windows && amd64)))
-
-package agent
+package sharedlib
 
 import (
 	"bufio"
@@ -21,7 +19,6 @@ import (
 const (
 	releaseURLVariable = "AGENT_CLI_CONNECTOR_RELEASE_URL"
 	noDownloadVariable = "AGENT_CLI_CONNECTOR_NO_DOWNLOAD"
-	defaultReleaseURL  = "https://github.com/saanuregh/agent-cli-connector/releases/download/v" + LibraryVersion + "/"
 	checksumsFileName  = "SHA256SUMS"
 )
 
@@ -57,7 +54,7 @@ func libraryFileName(platform string) string {
 
 // cachedLibrary returns the shared library in the user cache directory,
 // downloading it first unless downloading is turned off.
-func cachedLibrary() (string, error) {
+func cachedLibrary(version string) (string, error) {
 	platform, err := releasePlatform()
 	if err != nil {
 		return "", err
@@ -66,7 +63,7 @@ func cachedLibrary() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("agent: no user cache directory (%w); set %s to the shared library", err, libraryPathVariable)
 	}
-	dir := filepath.Join(cacheRoot, "agent-cli-connector", LibraryVersion, platform)
+	dir := filepath.Join(cacheRoot, "agent-cli-connector", version, platform)
 	name := libraryFileName(platform)
 	path := filepath.Join(dir, name)
 	if _, err := os.Stat(path); err == nil {
@@ -79,16 +76,16 @@ func cachedLibrary() (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("agent: create the cache directory: %w", err)
 	}
-	if err := downloadVerified(releaseBaseURL(), name, path); err != nil {
+	if err := downloadVerified(releaseBaseURL(version), name, path); err != nil {
 		return "", fmt.Errorf("%w; set %s to a local shared library, or %s to another release", err, libraryPathVariable, releaseURLVariable)
 	}
 	return path, nil
 }
 
-func releaseBaseURL() string {
+func releaseBaseURL(version string) string {
 	base := os.Getenv(releaseURLVariable)
 	if base == "" {
-		return defaultReleaseURL
+		return "https://github.com/saanuregh/agent-cli-connector/releases/download/v" + version + "/"
 	}
 	if !strings.HasSuffix(base, "/") {
 		base += "/"
