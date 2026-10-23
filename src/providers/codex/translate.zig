@@ -447,6 +447,11 @@ fn turnStarted(codex: *CodexSession, id: []const u8, raw: RawJson) void {
     // turn itself, such as for a compaction.
     const own = id.len > 0 and !translator.start_pending and !codex.rt().knowsTurn(id);
     const origin: []const u8 = if (!own) "" else if (codex.compacting) "compaction" else "codex";
+    // This turn is the start's, and runStarted below gives the runtime its
+    // ID. Clearing the start here, not only when the caller's task handles
+    // the turn/start reply, keeps a turn Codex starts right after it from
+    // being taken for the start's.
+    if (translator.start_pending and id.len > 0) translator.start_pending = false;
     if (id.len > 0 and !containsId(translator.turn_order.items, id)) {
         if (translator.turn_order.append(gpa, .of(id))) {
             if (translator.turn_order.items.len > max_turn_order) {
