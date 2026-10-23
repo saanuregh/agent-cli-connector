@@ -21,6 +21,7 @@
         default = pkgs.mkShell {
           packages = with pkgs; [
             zig_0_17
+            llvm # llvm-objcopy, for `zig build go-libs`
             zls
             go
             gopls

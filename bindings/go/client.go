@@ -15,10 +15,10 @@
 //
 // # Native library
 //
-// With cgo on linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and
-// windows/amd64, the static library is linked into the program, from the
-// bindings/go/lib/<os>-<arch> module of this platform. Nothing is loaded or
-// downloaded at run time.
+// With cgo on linux/amd64 and linux/arm64 (not Android), darwin/amd64 and
+// darwin/arm64 (macOS 15 or later), and windows/amd64, the static library is
+// linked into the program, from the bindings/go/lib/<os>-<arch> module of
+// this platform. Nothing is loaded or downloaded at run time.
 //
 // With cgo off, on any other platform, or with the build tag agent_use_lib,
 // the binding loads the shared library at run time without cgo. The first

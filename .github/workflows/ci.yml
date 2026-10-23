@@ -37,14 +37,13 @@ jobs:
         run: zig build release
 
   # The Go binding with cgo, linking the static library of bindings/go/lib.
-  # The committed archives are rebuilt first, so the tests use this commit's
-  # library. They are not compared with the committed ones: archive member
-  # names hold the builder's absolute Zig cache path, so they differ per machine.
+  # The committed archives are tested first, then rebuilt, so the remaining
+  # tests use this commit's library. There is a runner for every archive.
   go:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -71,8 +70,16 @@ jobs:
           install: mingw-w64-ucrt-x86_64-gcc
       - if: runner.os == 'Windows'
         run: printf '%s\n' '${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin' >> "$GITHUB_PATH"
+      # zig build go-libs runs llvm-objcopy (build.zig localizeLibcSymbols),
+      # which build.zig also looks for in Homebrew's llvm. The Windows image
+      # ships LLVM.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y llvm
+      - if: runner.os == 'macOS'
+        run: brew install llvm
       # The committed libraries are what Go users link: their version must be
-      # this commit's. Archives differ by machine, so they are not compared.
+      # this commit's. They are not compared with the rebuilt ones: archive
+      # member names hold the builder's absolute Zig cache path.
       - name: committed libraries
         working-directory: bindings/go
         run: go test -run TestStaticLink .

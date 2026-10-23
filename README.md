@@ -99,14 +99,23 @@ downloaded at run time. Each supported platform has its own Go module, `bindings
 On Windows, cgo needs a MinGW-w64 gcc (or `zig cc -target x86_64-windows-gnu`) as `CC`.
 
 - `go build -tags agent_use_lib` keeps cgo but loads the shared library at run time instead.
-- `CGO_ENABLED=0`, or a platform without a module, loads the shared library at run time as described above.
+- `CGO_ENABLED=0`, Android, or a platform without a module, loads the shared library at run time as described above.
+- The macOS libraries need macOS 15 or later, the oldest Zig supports. On older macOS, build with
+  `-tags agent_use_lib` and a shared library built there.
+- A plain `go build` downloads only its own platform's module; `go mod tidy` downloads all five, as it considers every
+  platform.
+- The libraries bundle Zig's compiler-rt, which defines libc and libm functions such as `memcpy` and `sin`. On Linux
+  and macOS `zig build go-libs` makes them local to the library, so other C code in the program keeps the system's.
+  On Windows, `llvm-objcopy` cannot do this for COFF objects, so they stay weak definitions that the linker may use
+  for other C code too.
 
 Releasing the Go binding at version `X.Y.Z`:
 
-1. `zig build go-libs` builds the static libraries and copies them, with `include/agent.h`, into `bindings/go`.
-2. Commit the result.
-3. Tag that commit `bindings/go/lib/<os>-<arch>/vX.Y.Z` for all five platforms, plus `bindings/go/vX.Y.Z` and
-   `vX.Y.Z`. `bindings/go/go.mod` must require the platform modules at `vX.Y.Z`.
+1. `zig build go-libs` builds the static libraries and copies them, with `include/agent.h`, into `bindings/go`. It
+   needs `llvm-objcopy` on `PATH` (`nix develop` provides it).
+2. Commit the result. `bindings/go/go.mod` must require the platform modules at `vX.Y.Z`; `go test` checks this.
+3. Tag that commit `vX.Y.Z`. The release workflow also tags it `bindings/go/vX.Y.Z` and
+   `bindings/go/lib/<os>-<arch>/vX.Y.Z` for every platform, which `go get` needs.
 
 ## Concepts
 
@@ -298,7 +307,7 @@ call `finish_compaction`, and the session call `echo` returns its params.
 zig build test --summary all                    # library and providers, against scripted fake harnesses
 CODEX_LIVE=1 zig build test-codex               # live Codex check; spends tokens
 zig build test -Dtarget=x86_64-windows -fwine   # the Windows build, under Wine
-cd bindings/go && go test -race ./...           # bindings, against the fake provider (static library with cgo)
+cd bindings/go && go test -race ./...           # bindings, against the fake provider; with cgo, the committed static library
 cd bindings/go && CGO_ENABLED=0 go test ./...   # the purego path; loads zig-out/lib after `zig build`
 cd bindings/rust && cargo test
 cd bindings/typescript && node --test

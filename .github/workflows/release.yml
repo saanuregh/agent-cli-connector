@@ -24,14 +24,27 @@ jobs:
       # The bindings download the release named after the version they were
       # generated from, so the tag must match it.
       - name: tag matches the library version
+        id: version
         run: |
           version=$(sed -n 's/^pub const library_version = "\(.*\)";/\1/p' src/rpc.zig)
           test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME does not match library_version $version"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: build
         run: zig build release
       - name: checksums
         working-directory: zig-out/release
         run: sha256sum * > SHA256SUMS
+      # The Go binding and each platform module of bindings/go/lib are
+      # separate Go modules, which `go get` resolves by their own tags. They
+      # are pushed before publishing, so a re-run after a failed publish only
+      # re-pushes the same tags, which succeeds.
+      - name: Go module tags
+        run: |
+          version=${{ steps.version.outputs.version }}
+          tags="bindings/go/v$version"
+          for dir in bindings/go/lib/*/; do tags="$tags ${dir%/}/v$version"; done
+          for tag in $tags; do git tag "$tag" "$GITHUB_SHA"; done
+          git push origin $tags
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}

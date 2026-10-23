@@ -111,8 +111,10 @@ pub fn build(b: *std.Build) void {
     go_libs.addCopyFileToSource(b.path("include/agent.h"), "bindings/go/agent.h");
     for (release_platforms) |platform| {
         const query = std.Target.Query.parse(.{ .arch_os_abi = platform.zig_target }) catch @panic("bad release target");
-        const release_static_lib = addReleaseFiles(b, release, b.resolveTargetQuery(query), platform.name);
-        go_libs.addCopyFileToSource(release_static_lib.getEmittedBin(), b.fmt("bindings/go/lib/{s}/libagent-cli-connector.a", .{platform.go_name}));
+        const release_target = b.resolveTargetQuery(query);
+        const release_static_lib = addReleaseFiles(b, release, release_target, platform.name);
+        const go_lib = localizeLibcSymbols(b, release_static_lib.getEmittedBin(), release_target.result);
+        go_libs.addCopyFileToSource(go_lib, b.fmt("bindings/go/lib/{s}/libagent-cli-connector.a", .{platform.go_name}));
     }
     b.step("go-libs", "Copy the release static libraries and header into bindings/go").dependOn(&go_libs.step);
 
@@ -138,6 +140,36 @@ pub fn build(b: *std.Build) void {
         b.step("test-" ++ name, "Run the " ++ name ++ " provider tests").dependOn(&run.step);
         if (on) test_step.dependOn(&run.step);
     }
+}
+
+/// A copy of a static library whose bundled compiler-rt no longer exports the
+/// libc and libm functions it defines (memcpy, strlen, sin, ...). Exported, they
+/// would replace the system C library's for every C object in a Go program
+/// that links the library. Only agent_*, the compiler's `__` helpers, and the
+/// round and roundf128 the library calls stay global. Needs llvm-objcopy, as
+/// `zig objcopy` cannot localize symbols. llvm-objcopy cannot for COFF either,
+/// so a Windows library is returned unchanged.
+fn localizeLibcSymbols(b: *std.Build, static_lib: std.Build.LazyPath, target: std.Target) std.Build.LazyPath {
+    if (target.os.tag == .windows) return static_lib;
+    const prefix = if (target.os.tag.isDarwin()) "_" else "";
+    // Found when go-libs runs, so other steps do not need it. Homebrew's llvm
+    // is keg-only and LLVM's Windows installer may leave PATH alone; looking
+    // in their directories keeps their clang off cgo's PATH.
+    const llvm_objcopy = b.findProgramLazy(.{ .names = &.{
+        "llvm-objcopy",
+        "/opt/homebrew/opt/llvm/bin/llvm-objcopy",
+        "/usr/local/opt/llvm/bin/llvm-objcopy",
+        "C:\\Program Files\\LLVM\\bin\\llvm-objcopy",
+    } });
+    const objcopy = std.Build.Step.Run.create(b, "llvm-objcopy");
+    objcopy.addFileArg(llvm_objcopy);
+    objcopy.addArg("--wildcard");
+    for ([_][]const u8{ "agent_*", "__*", "round", "roundf128" }) |kept| {
+        objcopy.addArg(b.fmt("--localize-symbol=!{s}{s}", .{ prefix, kept }));
+    }
+    objcopy.addArg("--localize-symbol=*");
+    objcopy.addFileArg(static_lib);
+    return objcopy.addOutputFileArg("libagent-cli-connector.a");
 }
 
 /// One platform's release files: the shared and static libraries and
