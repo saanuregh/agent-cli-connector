@@ -3,13 +3,15 @@ const std = @import("std");
 const providers = [_][]const u8{ "claude", "codex", "pi" };
 
 /// The platforms release files are built for. Bindings download the files
-/// for their platform by these names (`<file>-<name>.<ext>`).
-const release_platforms = [_]struct { name: []const u8, zig_target: []const u8 }{
-    .{ .name = "linux-x86_64", .zig_target = "x86_64-linux-gnu.2.28" },
-    .{ .name = "linux-aarch64", .zig_target = "aarch64-linux-gnu.2.28" },
-    .{ .name = "macos-x86_64", .zig_target = "x86_64-macos" },
-    .{ .name = "macos-aarch64", .zig_target = "aarch64-macos" },
-    .{ .name = "windows-x86_64", .zig_target = "x86_64-windows-gnu" },
+/// for their platform by these names (`<file>-<name>.<ext>`). `go_name` is
+/// the Go module directory, `bindings/go/lib/<go_name>`, that holds the
+/// platform's static library.
+const release_platforms = [_]struct { name: []const u8, zig_target: []const u8, go_name: []const u8 }{
+    .{ .name = "linux-x86_64", .zig_target = "x86_64-linux-gnu.2.28", .go_name = "linux-amd64" },
+    .{ .name = "linux-aarch64", .zig_target = "aarch64-linux-gnu.2.28", .go_name = "linux-arm64" },
+    .{ .name = "macos-x86_64", .zig_target = "x86_64-macos", .go_name = "darwin-amd64" },
+    .{ .name = "macos-aarch64", .zig_target = "aarch64-macos", .go_name = "darwin-arm64" },
+    .{ .name = "windows-x86_64", .zig_target = "x86_64-windows-gnu", .go_name = "windows-amd64" },
 };
 
 pub fn build(b: *std.Build) void {
@@ -102,10 +104,17 @@ pub fn build(b: *std.Build) void {
     // platform the bindings download, in zig-out/release.
     const release = b.step("release", "Build the release files for every platform into zig-out/release");
     release.dependOn(&b.addInstallFileWithDir(b.path("include/agent.h"), .{ .custom = "release" }, "agent.h").step);
+    // `zig build go-libs`: the release static libraries and the header,
+    // copied into the Go binding's platform modules, which link them with cgo.
+    // Windows' `.lib` is a GNU archive, so it keeps the `.a` name cgo expects.
+    const go_libs = b.addUpdateSourceFiles();
+    go_libs.addCopyFileToSource(b.path("include/agent.h"), "bindings/go/agent.h");
     for (release_platforms) |platform| {
         const query = std.Target.Query.parse(.{ .arch_os_abi = platform.zig_target }) catch @panic("bad release target");
-        addReleaseFiles(b, release, b.resolveTargetQuery(query), platform.name);
+        const release_static_lib = addReleaseFiles(b, release, b.resolveTargetQuery(query), platform.name);
+        go_libs.addCopyFileToSource(release_static_lib.getEmittedBin(), b.fmt("bindings/go/lib/{s}/libagent-cli-connector.a", .{platform.go_name}));
     }
+    b.step("go-libs", "Copy the release static libraries and header into bindings/go").dependOn(&go_libs.step);
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = c_api })).step);
@@ -132,8 +141,8 @@ pub fn build(b: *std.Build) void {
 }
 
 /// One platform's release files: the shared and static libraries and
-/// agentd, built with every provider.
-fn addReleaseFiles(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTarget, platform: []const u8) void {
+/// agentd, built with every provider. Returns the static library.
+fn addReleaseFiles(b: *std.Build, step: *std.Build.Step, target: std.Build.ResolvedTarget, platform: []const u8) *std.Build.Step.Compile {
     const optimize: std.builtin.OptimizeMode = .ReleaseFast;
     const agent = b.createModule(.{ .root_source_file = b.path("src/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     inline for (providers) |name| {
@@ -190,4 +199,5 @@ fn addReleaseFiles(b: *std.Build, step: *std.Build.Step, target: std.Build.Resol
             .h_dir = .disabled,
         }).step);
     }
+    return static_lib;
 }

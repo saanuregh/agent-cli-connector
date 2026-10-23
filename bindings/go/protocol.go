@@ -6,7 +6,7 @@ import "encoding/json"
 
 // LibraryVersion is the library version these bindings were generated
 // from; release files are downloaded for it.
-const LibraryVersion = "0.3.0"
+const LibraryVersion = "0.4.0"
 
 // JSON-RPC method names: client requests, notifications, and requests to the client.
 const (
@@ -1678,7 +1678,7 @@ type ClaudeOptions struct {
 type ClaudeSessionOptions struct {
 	Agent                      string          `json:"agent,omitempty"`
 	Agents                     json.RawMessage `json:"agents,omitempty"`
-	BuiltinTools               []string        `json:"builtin_tools,omitempty"`
+	BuiltinTools               []string        `json:"builtin_tools,omitzero"`
 	ToolAliases                json.RawMessage `json:"tool_aliases,omitempty"`
 	FallbackModel              string          `json:"fallback_model,omitempty"`
 	Thinking                   *ClaudeThinking `json:"thinking,omitempty"`
@@ -1691,12 +1691,12 @@ type ClaudeSessionOptions struct {
 	SystemPromptSnapshot       *bool           `json:"system_prompt_snapshot,omitempty"`
 	AppendSubagentSystemPrompt string          `json:"append_subagent_system_prompt,omitempty"`
 	PlanModeInstructions       string          `json:"plan_mode_instructions,omitempty"`
-	SettingSources             []string        `json:"setting_sources,omitempty"`
+	SettingSources             []string        `json:"setting_sources,omitzero"`
 	Settings                   json.RawMessage `json:"settings,omitempty"`
 	ManagedSettings            json.RawMessage `json:"managed_settings,omitempty"`
 	Sandbox                    json.RawMessage `json:"sandbox,omitempty"`
 	Plugins                    []ClaudePlugin  `json:"plugins,omitempty"`
-	Skills                     []string        `json:"skills,omitempty"`
+	Skills                     []string        `json:"skills,omitzero"`
 	StrictMcpConfig            bool            `json:"strict_mcp_config,omitempty"`
 	McpViaControl              bool            `json:"mcp_via_control,omitempty"`
 	ProjectConfigRoot          string          `json:"project_config_root,omitempty"`

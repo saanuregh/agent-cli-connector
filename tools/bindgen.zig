@@ -280,6 +280,15 @@ fn isRecord(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and !isMap(T) and T != RawJson;
 }
 
+/// An optional list other than a string. Go sends an empty one, which means
+/// "none", and leaves out only nil, which means "the default".
+fn isOptionalList(comptime T: type) bool {
+    const info = @typeInfo(T);
+    if (info != .optional) return false;
+    const child = @typeInfo(info.optional.child);
+    return child == .pointer and child.pointer.size == .slice and child.pointer.child != u8;
+}
+
 /// The union field of a struct written with `json.writeFlattened`.
 fn flattenedField(comptime T: type) ?[]const u8 {
     if (!std.meta.hasFn(T, "jsonStringify")) return null;
@@ -1401,7 +1410,7 @@ fn goStruct(w: *Writer, comptime name: []const u8, comptime fields: []const Fiel
     const rows = comptime blk: {
         var out: []const Row = &.{};
         for (fields) |f| {
-            const opt = if (f.default == null) "" else if (isRecord(f.T)) ",omitzero" else ",omitempty";
+            const opt = if (f.default == null) "" else if (isRecord(f.T) or isOptionalList(f.T)) ",omitzero" else ",omitempty";
             out = out ++ [_]Row{&.{ goName(f.name), goFieldType(f), "`json:\"" ++ f.name ++ opt ++ "\"`" }};
         }
         break :blk out;

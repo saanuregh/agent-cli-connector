@@ -36,8 +36,61 @@ jobs:
         if: runner.os == 'Linux'
         run: zig build release
 
+  # The Go binding with cgo, linking the static library of bindings/go/lib.
+  # The committed archives are rebuilt first, so the tests use this commit's
+  # library. They are not compared with the committed ones: archive member
+  # names hold the builder's absolute Zig cache path, so they differ per machine.
   go:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: bindings/go/go.mod
+      # cgo on Windows needs a MinGW-w64 gcc. MSYS2's is installed explicitly
+      # rather than relying on whichever gcc the runner image puts on PATH, and
+      # gcc rather than `zig cc` because hosts that also link C++ libraries
+      # (DuckDB) build with gcc.
+      - if: runner.os == 'Windows'
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-gcc
+      - if: runner.os == 'Windows'
+        run: printf '%s\n' '${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin' >> "$GITHUB_PATH"
+      # The committed libraries are what Go users link: their version must be
+      # this commit's. Archives differ by machine, so they are not compared.
+      - name: committed libraries
+        working-directory: bindings/go
+        run: go test -run TestStaticLink .
+      - run: zig build go-libs
+      - run: git diff --exit-code bindings/go/agent.h
+      - name: binding
+        working-directory: bindings/go
+        run: test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...
+      - name: examples
+        if: runner.os == 'Linux'
+        working-directory: examples
+        run: go vet ./... && go test ./...
+
+  # The Go binding without cgo: purego loads zig-out/lib (bindings/go/main_test.go).
+  go-purego:
     runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
@@ -49,9 +102,6 @@ jobs:
       - run: zig build -Doptimize=ReleaseFast
       - name: binding
         working-directory: bindings/go
-        run: test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...
-      - name: examples
-        working-directory: examples
         run: go vet ./... && go test ./...
 
   rust:
