@@ -112,7 +112,7 @@ On Windows, cgo needs a MinGW-w64 gcc (or `zig cc -target x86_64-windows-gnu`) a
 Releasing the Go binding at version `X.Y.Z`:
 
 1. `zig build go-libs` builds the static libraries and copies them, with `include/agent.h`, into `bindings/go`. It
-   needs `llvm-objcopy` on `PATH` (`nix develop` provides it).
+   needs `llvm-objcopy` from LLVM 20 or later on `PATH` (`nix develop` provides it).
 2. Commit the result. `bindings/go/go.mod` must require the platform modules at `vX.Y.Z`; `go test` checks this.
 3. Tag that commit `vX.Y.Z`. The release workflow also tags it `bindings/go/vX.Y.Z` and
    `bindings/go/lib/<os>-<arch>/vX.Y.Z` for every platform, which `go get` needs.

@@ -146,8 +146,9 @@ pub fn build(b: *std.Build) void {
 /// libc and libm functions it defines (memcpy, strlen, sin, ...). Exported, they
 /// would replace the system C library's for every C object in a Go program
 /// that links the library. Only agent_*, the compiler's `__` helpers, and the
-/// round and roundf128 the library calls stay global. Needs llvm-objcopy, as
-/// `zig objcopy` cannot localize symbols. llvm-objcopy cannot for COFF either,
+/// round and roundf128 the library calls stay global. Needs llvm-objcopy 20
+/// or later (older ones refuse Mach-O), as `zig objcopy` cannot localize
+/// symbols. llvm-objcopy cannot for COFF either,
 /// so a Windows library is returned unchanged.
 fn localizeLibcSymbols(b: *std.Build, static_lib: std.Build.LazyPath, target: std.Target) std.Build.LazyPath {
     if (target.os.tag == .windows) return static_lib;
