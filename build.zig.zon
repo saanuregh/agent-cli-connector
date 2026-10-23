@@ -1,6 +1,6 @@
 .{
     .name = .agent_cli_connector,
-    .version = "0.3.0",
+    .version = "0.4.0",
     .fingerprint = 0xcd6a2941923d16c,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{},

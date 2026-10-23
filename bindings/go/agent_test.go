@@ -299,3 +299,22 @@ func TestInterruptCancelsToolCall(t *testing.T) {
 		t.Fatalf("result %+v, error %v", res, err)
 	}
 }
+
+// An empty list means "none", so it must reach the library; only a nil list
+// is left out.
+func TestEmptyListIsSent(t *testing.T) {
+	got, err := json.Marshal(agent.ClaudeSessionOptions{BuiltinTools: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `{"builtin_tools":[]}` {
+		t.Errorf("empty list: got %s", got)
+	}
+	got, err = json.Marshal(agent.ClaudeSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `{}` {
+		t.Errorf("nil list: got %s", got)
+	}
+}

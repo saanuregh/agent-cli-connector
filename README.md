@@ -66,7 +66,8 @@ zig build release                    # every platform's files into zig-out/relea
 
 ### Prebuilt libraries
 
-The bindings do not need a local Zig build: they fetch the library from the GitHub release for their version
+The Go binding with cgo links the library it ships (see [Go: static linking](#go-static-linking)). The other bindings,
+and Go without cgo, do not need a local Zig build: they fetch the library from the GitHub release for their version
 (`v0.3.0` for 0.3.0), into the user cache, and check it against the release's `SHA256SUMS`. Releases carry the shared
 and static library and `agentd` for `linux-x86_64`, `linux-aarch64` (glibc 2.28 or newer), `macos-x86_64`,
 `macos-aarch64`, and `windows-x86_64`. Pushing a tag `v<version>` that matches `library_version` builds and
@@ -83,12 +84,29 @@ publishes them (`.github/workflows/release.yml`).
 | Language | Package | Links |
 | --- | --- | --- |
 | Zig | `build.zig.zon` dependency, module `agent` | from source |
-| Go | `bindings/go` (`github.com/saanuregh/agent-cli-connector/bindings/go`) | the shared library through purego, without cgo: `AGENT_CLI_CONNECTOR_LIB`, else the user cache, else a download from the matching GitHub release checked against `SHA256SUMS` (`AGENT_CLI_CONNECTOR_NO_DOWNLOAD=1` turns it off) |
+| Go | `bindings/go` (`github.com/saanuregh/agent-cli-connector/bindings/go`) | with cgo, the static library of its `bindings/go/lib/<os>-<arch>` module, linked in; with cgo off, another platform, or `-tags agent_use_lib`, the shared library through purego: `AGENT_CLI_CONNECTOR_LIB`, else the user cache, else a download from the matching GitHub release checked against `SHA256SUMS` (`AGENT_CLI_CONNECTOR_NO_DOWNLOAD=1` turns it off) |
 | Rust | `bindings/rust` (crate `agent-cli-connector`) | the static library from `AGENT_CLI_CONNECTOR_LIB_DIR`, then `zig-out/lib`, then `zig build` when Zig is on `PATH` in a repository checkout, then a download from the GitHub release for the crate version, checked against `SHA256SUMS` (`AGENT_CLI_CONNECTOR_RELEASE_URL` replaces the base URL; `AGENT_CLI_CONNECTOR_NO_DOWNLOAD=1` turns it off) |
 | TypeScript | `bindings/typescript` (package `agent-cli-connector`, Node 24) | the shared library through `koffi` (`AGENT_CLI_CONNECTOR_LIB`), or the `agentd` subprocess (`AGENTD_PATH`); without a local build, `Client.open` downloads both from the matching GitHub release into the user cache, checked against `SHA256SUMS` (`AGENT_CLI_CONNECTOR_NO_DOWNLOAD=1` turns this off) |
 
 Any other language can load the shared library (`include/agent.h`) or run `agentd`, which speaks the same protocol
 over standard input and output, one JSON message per line.
+
+### Go: static linking
+
+With cgo, the Go binding links the static library into the program, as `duckdb-go-bindings` does: nothing is loaded or
+downloaded at run time. Each supported platform has its own Go module, `bindings/go/lib/<os>-<arch>` (`linux-amd64`,
+`linux-arm64`, `darwin-amd64`, `darwin-arm64`, `windows-amd64`), holding the committed `libagent-cli-connector.a`.
+On Windows, cgo needs a MinGW-w64 gcc (or `zig cc -target x86_64-windows-gnu`) as `CC`.
+
+- `go build -tags agent_use_lib` keeps cgo but loads the shared library at run time instead.
+- `CGO_ENABLED=0`, or a platform without a module, loads the shared library at run time as described above.
+
+Releasing the Go binding at version `X.Y.Z`:
+
+1. `zig build go-libs` builds the static libraries and copies them, with `include/agent.h`, into `bindings/go`.
+2. Commit the result.
+3. Tag that commit `bindings/go/lib/<os>-<arch>/vX.Y.Z` for all five platforms, plus `bindings/go/vX.Y.Z` and
+   `vX.Y.Z`. `bindings/go/go.mod` must require the platform modules at `vX.Y.Z`.
 
 ## Concepts
 
@@ -280,7 +298,8 @@ call `finish_compaction`, and the session call `echo` returns its params.
 zig build test --summary all                    # library and providers, against scripted fake harnesses
 CODEX_LIVE=1 zig build test-codex               # live Codex check; spends tokens
 zig build test -Dtarget=x86_64-windows -fwine   # the Windows build, under Wine
-cd bindings/go && go test -race ./...           # bindings, against the fake provider
+cd bindings/go && go test -race ./...           # bindings, against the fake provider (static library with cgo)
+cd bindings/go && CGO_ENABLED=0 go test ./...   # the purego path; loads zig-out/lib after `zig build`
 cd bindings/rust && cargo test
 cd bindings/typescript && node --test
 ```

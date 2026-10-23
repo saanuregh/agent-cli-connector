@@ -5,17 +5,24 @@
 //	sess, err := client.Start(ctx, "claude", agent.Config{Cwd: dir})
 //	res, err := sess.Run(ctx, agent.Text("Add a test for parseConfig"))
 //
-// A [Client] is one connection to the native library, loaded at run time
-// without cgo. It offers providers ([Client.Check], [Client.ListModels],
-// ...) and starts [Session] values. A session streams [Event] values on
-// [Session.Events] and runs turns ([Session.Send] returns a [Turn]).
+// A [Client] is one connection to the native library. It offers providers
+// ([Client.Check], [Client.ListModels], ...) and starts [Session] values. A
+// session streams [Event] values on [Session.Events] and runs turns
+// ([Session.Send] returns a [Turn]).
 // Permission, question, and elicitation requests arrive as events and are
 // answered with [Session.Respond] and its helpers, or by [Handlers]. Host
 // tools ([NewTool]) are Go functions the model can call.
 //
 // # Native library
 //
-// The first [Open] finds the shared library, in this order:
+// With cgo on linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and
+// windows/amd64, the static library is linked into the program, from the
+// bindings/go/lib/<os>-<arch> module of this platform. Nothing is loaded or
+// downloaded at run time.
+//
+// With cgo off, on any other platform, or with the build tag agent_use_lib,
+// the binding loads the shared library at run time without cgo. The first
+// [Open] finds it in this order:
 //
 //  1. the path in AGENT_CLI_CONNECTOR_LIB;
 //  2. the user cache directory, under

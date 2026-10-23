@@ -2,7 +2,7 @@
 
 /// The library version these bindings were generated from; release files
 /// are downloaded for it.
-pub const LIBRARY_VERSION: &str = "0.3.0";
+pub const LIBRARY_VERSION: &str = "0.4.0";
 
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
