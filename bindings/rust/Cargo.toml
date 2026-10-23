@@ -1,6 +1,6 @@
 [package]
 name = "agent-cli-connector"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "One API over coding-agent CLIs (Claude Code, Codex, Pi): Rust binding of the agent-cli-connector library."
 license = "MIT"

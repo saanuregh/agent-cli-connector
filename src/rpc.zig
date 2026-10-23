@@ -23,7 +23,7 @@ const Diagnostics = errors.Diagnostics;
 const log = std.log.scoped(.agent);
 
 pub const protocol_version = 1;
-pub const library_version = "0.4.0";
+pub const library_version = "0.4.1";
 
 // ---------------------------------------------------------------- protocol
 
